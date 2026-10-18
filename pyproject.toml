@@ -9,6 +9,8 @@ dependencies = [
     "numpy>=1.26",
     "matplotlib>=3.8",
     "pyyaml>=6.0",
+    "pytest>=9.1.1",
+    "pip>=26.2.1",
 ]
 
 [project.optional-dependencies]
