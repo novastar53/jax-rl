@@ -26,5 +26,3 @@ class KArmedBandit(Environment):
 
 
 
-
-    
