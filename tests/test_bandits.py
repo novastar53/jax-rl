@@ -91,3 +91,18 @@ def test_epsilon_greedy_uniform():
     expected = jnp.array([0.25, 0.25, 0.25, 0.25])
 
     assert jnp.allclose(frequencies, expected, atol=0.02)
+
+
+def test_optimistic_initialization():
+    agent = SampleAverageAgent(k=10, initial_q=5.0)
+    state = agent.init()
+
+    # All action-value estimates should initially be 5
+    assert jnp.all(state.Q == 5.0)
+
+    # No actions should have been selected yet
+    assert jnp.all(state.N == 0)
+
+    # Verify shapes
+    assert state.Q.shape == (10,)
+    assert state.N.shape == (10,)
