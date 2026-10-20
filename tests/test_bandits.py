@@ -106,3 +106,34 @@ def test_optimistic_initialization():
     # Verify shapes
     assert state.Q.shape == (10,)
     assert state.N.shape == (10,)
+
+
+from jax_rl.bandits.ucb import UCBPolicy
+
+
+def test_ucb_untried_action():
+    policy = UCBPolicy(c=2.0)
+    key = jax.random.key(42)
+
+    Q = jnp.array([1.0, 2.0, 0.0, 3.0])
+    N = jnp.array([10, 5, 0, 8])
+
+    action = policy.select_action(key, Q, N, t=100)
+
+    # Action 2 has never been tried, so it must be selected
+    assert int(action) == 2
+
+
+def test_ucb_exploration_bonus():
+    policy = UCBPolicy(c=2.0)
+    key = jax.random.key(42)
+
+    # All actions have identical estimated values
+    Q = jnp.array([1.0, 1.0, 1.0, 1.0])
+
+    # Action 1 has been sampled the fewest times
+    N = jnp.array([100, 5, 50, 80])
+
+    action = policy.select_action(key, Q, N, t=100)
+
+    assert int(action) == 1
