@@ -4,16 +4,15 @@ import jax.numpy as jnp
 from . import Environment
 
 class KArmedBandit(Environment):
-    def __init__(self, k=10):
+    def __init__(self, k=10, mean=0.0):
         self.k = k
-
+        self.mean = mean
 
     def reset(self, key):
-        q_star = jax.random.normal(key, shape=(self.k,))
+        q_star = self.mean + jax.random.normal(key, shape=(self.k,))
         observation = 0
         env_state = q_star
         return env_state, observation
-
 
     def step(self, key, env_state, action):
         reward = env_state[action] + jax.random.normal(key) 

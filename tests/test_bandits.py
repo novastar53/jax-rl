@@ -137,3 +137,36 @@ def test_ucb_exploration_bonus():
     action = policy.select_action(key, Q, N, t=100)
 
     assert int(action) == 1
+
+
+from jax_rl.bandits.gradient_bandit import GradientBanditAgent
+
+
+def test_gradient_bandit_update():
+    agent = GradientBanditAgent(k=2, alpha=0.1)
+    state = agent.init()
+
+    # Initial state
+    assert jnp.allclose(state.H, jnp.array([0.0, 0.0]))
+    assert state.avg_reward == 0.0
+    assert state.N == 0
+
+    # Select action 0 and receive reward 2
+    new_state = agent.update(
+        state,
+        action=0,
+        reward=2.0,
+    )
+
+    # Verify preference updates
+    expected_H = jnp.array([0.1, -0.1])
+    assert jnp.allclose(new_state.H, expected_H)
+
+    # Verify running reward average
+    assert jnp.isclose(new_state.avg_reward, 2.0)
+
+    # Verify observation count
+    assert new_state.N == 1
+
+    # Verify original state remains unchanged
+    assert jnp.allclose(state.H, jnp.zeros(2))
