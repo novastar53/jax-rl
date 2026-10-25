@@ -101,3 +101,83 @@ def test_gridworld_jit():
     assert int(new_state) == 6
     assert float(reward) == -1.0
     assert not bool(terminated)
+
+
+from jax_rl.envs.bernoulli_bandit import BernoulliBandit
+
+
+def test_bernoulli_bandit_reset():
+    env = BernoulliBandit(k=10)
+    key = jax.random.key(42)
+
+    env_state, observation = env.reset(key)
+
+    assert env_state.shape == (10,)
+    assert jnp.all(env_state >= 0.0)
+    assert jnp.all(env_state <= 1.0)
+    assert observation == 0
+
+
+def test_bernoulli_bandit_step():
+    env = BernoulliBandit(k=10)
+    key = jax.random.key(42)
+
+    key, reset_key, step_key = jax.random.split(key, 3)
+
+    env_state, _ = env.reset(reset_key)
+
+    new_state, observation, reward, terminated, info = env.step(
+        step_key, env_state, action=3
+    )
+
+    # Reward must be a scalar Bernoulli outcome
+    assert reward.shape == ()
+    assert reward in (0, 1)
+
+    # Environment remains stationary
+    assert jnp.array_equal(new_state, env_state)
+
+    assert observation == 0
+    assert not terminated
+
+
+@pytest.mark.parametrize(
+    "action, expected_reward",
+    [
+        (0, 0),
+        (1, 1),
+    ],
+)
+def test_bernoulli_bandit_deterministic_rewards(
+    action, expected_reward
+):
+    env = BernoulliBandit(k=2)
+    key = jax.random.key(42)
+
+    # Arm 0 always fails; arm 1 always succeeds
+    env_state = jnp.array([0.0, 1.0])
+
+    _, _, reward, _, _ = env.step(
+        key, env_state, action
+    )
+
+    assert int(reward) == expected_reward
+
+
+def test_bernoulli_bandit_jit():
+    env = BernoulliBandit(k=2)
+
+    env_state = jnp.array([0.0, 1.0])
+    key = jax.random.key(42)
+
+    jitted_step = jax.jit(env.step)
+
+    new_state, _, reward, terminated, _ = jitted_step(
+        key,
+        env_state,
+        jnp.array(1),
+    )
+
+    assert int(reward) == 1
+    assert jnp.array_equal(new_state, env_state)
+    assert not bool(terminated)

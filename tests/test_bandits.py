@@ -170,3 +170,59 @@ def test_gradient_bandit_update():
 
     # Verify original state remains unchanged
     assert jnp.allclose(state.H, jnp.zeros(2))
+
+
+from jax_rl.bandits.beta_bernoulli import BetaBernoulliAgent
+
+
+def test_beta_bernoulli_update():
+    agent = BetaBernoulliAgent(k=2)
+    state = agent.init()
+
+    # Verify initial Beta(1, 1) priors
+    assert jnp.array_equal(state.alpha, jnp.ones(2))
+    assert jnp.array_equal(state.beta, jnp.ones(2))
+
+    # Select arm 0 four times
+    rewards = [1, 0, 1, 1]
+
+    for reward in rewards:
+        state = agent.update(state, action=0, reward=reward)
+
+    # Arm 0: 3 successes, 1 failure
+    # Arm 1: No observations
+    assert jnp.array_equal(state.alpha, jnp.array([4, 1]))
+    assert jnp.array_equal(state.beta, jnp.array([2, 1]))
+
+    # Verify posterior means
+    posterior_means = state.alpha / (state.alpha + state.beta)
+
+    assert jnp.allclose(
+        posterior_means,
+        jnp.array([4 / 6, 0.5])
+    )
+
+
+from jax_rl.bandits.beta_bernoulli import BetaBernoulliAgent, BetaBernoulliState
+
+
+def test_thompson_sampling_prefers_stronger_posterior():
+    agent = BetaBernoulliAgent(k=2)
+
+    # Arm 0 has a much stronger posterior than arm 1
+    state = BetaBernoulliState(
+        alpha=jnp.array([20.0, 2.0]),
+        beta=jnp.array([2.0, 20.0]),
+    )
+
+    key = jax.random.key(42)
+    keys = jax.random.split(key, 10_000)
+
+    actions = jax.vmap(agent.select_action, in_axes=(0, None))(keys, state)
+
+    counts = jnp.bincount(actions, length=2)
+    freq = counts / 10_000
+
+    # Arm 0 should be selected overwhelmingly often
+    assert freq[0] > 0.99
+    assert freq[1] < 0.01
