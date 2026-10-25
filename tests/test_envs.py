@@ -181,3 +181,107 @@ def test_bernoulli_bandit_jit():
     assert int(reward) == 1
     assert jnp.array_equal(new_state, env_state)
     assert not bool(terminated)
+
+
+from jax_rl.envs.contextual_bandit import (
+    ContextualBandit,
+    ContextualBanditState,
+)
+
+
+@pytest.fixture
+def env():
+    return ContextualBandit(num_contexts=3, k=4)
+
+
+def test_reset(env):
+    key = jax.random.key(42)
+    env_state, observation = env.reset(key)
+
+    assert isinstance(env_state, ContextualBanditState)
+    assert env_state.q_star.shape == (3, 4)
+
+    assert observation.shape == ()
+    assert 0 <= int(observation) < 3
+    assert jnp.array_equal(observation, env_state.context)
+
+
+def test_reward_generation(env):
+    key = jax.random.key(42)
+    env_state, _ = env.reset(key)
+
+    action = 2
+    step_key = jax.random.key(123)
+
+    reward_key, _ = jax.random.split(step_key)
+
+    expected_reward = (
+        env_state.q_star[env_state.context, action]
+        + jax.random.normal(reward_key)
+    )
+
+    _, _, reward, _, _ = env.step(
+        step_key, env_state, action
+    )
+
+    assert jnp.allclose(reward, expected_reward)
+
+
+def test_state_transition(env):
+    key = jax.random.key(42)
+    env_state, _ = env.reset(key)
+
+    step_key = jax.random.key(123)
+    _, context_key = jax.random.split(step_key)
+
+    expected_context = jax.random.choice(
+        context_key,
+        a=jnp.arange(env.num_contexts),
+    )
+
+    new_env_state, observation, reward, terminated, info = (
+        env.step(step_key, env_state, action=1)
+    )
+
+    # True action values remain stationary.
+    assert jnp.array_equal(
+        new_env_state.q_star,
+        env_state.q_star,
+    )
+
+    # The next context is sampled using the supplied key.
+    assert jnp.array_equal(
+        new_env_state.context,
+        expected_context,
+    )
+
+    assert jnp.array_equal(observation, expected_context)
+
+    assert reward.shape == ()
+    assert terminated is False
+    assert info == {}
+
+
+def test_jit_compatibility(env):
+    reset_fn = jax.jit(env.reset)
+    step_fn = jax.jit(env.step)
+
+    key = jax.random.key(42)
+    env_state, observation = reset_fn(key)
+
+    assert env_state.q_star.shape == (3, 4)
+    assert observation.shape == ()
+
+    new_env_state, next_observation, reward, terminated, info = (
+        step_fn(
+            jax.random.key(123),
+            env_state,
+            jnp.array(2),
+        )
+    )
+
+    assert new_env_state.q_star.shape == (3, 4)
+    assert next_observation.shape == ()
+    assert reward.shape == ()
+    assert not bool(terminated)
+    assert info == {}

@@ -229,6 +229,7 @@ def main():
                 steps,
                 result[metric],
                 label=name,
+                alpha=0.5,
             )
 
         ax.set_xlabel("Steps")
