@@ -76,3 +76,104 @@ def test_terminal_states_are_absorbing(model):
         for action in range(4):
             assert jnp.isclose(P[state, action, state], 1.0)
             assert jnp.isclose(R[state, action, state], 0.0)
+
+
+
+from jax_rl.dp.policy_evaluation import (
+    bellman_sweep,
+    iterative_policy_evaluation,
+)
+
+
+@pytest.fixture
+def random_policy():
+    # Uniform random policy for the 4x4 Gridworld
+    return jnp.full((16, 4), 0.25)
+
+
+def test_bellman_sweep(model, random_policy):
+    P, R = model
+    V = jnp.zeros(16)
+
+    V_new = bellman_sweep(
+        P, R, random_policy, V, gamma=1.0
+    )
+
+    expected = jnp.array([
+        [ 0, -1, -1, -1],
+        [-1, -1, -1, -1],
+        [-1, -1, -1, -1],
+        [-1, -1, -1,  0],
+    ]).reshape(-1)
+
+    assert jnp.allclose(V_new, expected)
+
+
+def test_iterative_policy_evaluation(model, random_policy):
+    P, R = model
+
+    V, iterations = iterative_policy_evaluation(
+        P,
+        R,
+        random_policy,
+        gamma=1.0,
+        theta=1e-6,
+        max_iterations=10000,
+    )
+
+    # Sutton & Barto, Example 4.1
+    expected = jnp.array([
+        [  0, -14, -20, -22],
+        [-14, -18, -20, -20],
+        [-20, -20, -18, -14],
+        [-22, -20, -14,   0],
+    ]).reshape(-1)
+
+    assert jnp.allclose(V, expected, atol=1e-3)
+    assert 1 < iterations < 10000
+
+
+def test_max_iterations(model, random_policy):
+    P, R = model
+
+    V, iterations = iterative_policy_evaluation(
+        P,
+        R,
+        random_policy,
+        gamma=1.0,
+        theta=1e-6,
+        max_iterations=1,
+    )
+
+    expected = jnp.array([
+        [ 0, -1, -1, -1],
+        [-1, -1, -1, -1],
+        [-1, -1, -1, -1],
+        [-1, -1, -1,  0],
+    ]).reshape(-1)
+
+    assert iterations == 1
+    assert jnp.allclose(V, expected)
+
+
+def test_discount_factor(model, random_policy):
+    P, R = model
+
+    V, iterations = iterative_policy_evaluation(
+        P,
+        R,
+        random_policy,
+        gamma=0.9,
+        theta=1e-6,
+        max_iterations=10000,
+    )
+
+    # A discounted value function should have smaller
+    # absolute values than the undiscounted solution.
+    undiscounted_V, _ = iterative_policy_evaluation(
+        P, R, random_policy, gamma=1.0
+    )
+
+    assert jnp.all(V >= undiscounted_V - 1e-4)
+    assert jnp.all(V <= 0)
+    assert iterations < 10000
