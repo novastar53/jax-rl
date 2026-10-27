@@ -18,11 +18,10 @@ def value_iteration(
         V:      (S,) optimal state values
         policy: (S, A) greedy policy with respect to V
     """
-    num_states, num_actions, _ = P.shape
+    num_states, _, _ = P.shape
     V = jnp.zeros(num_states,) # (S,)
     for _ in range(max_iterations):
-        Q = jnp.sum(P * (R + gamma * V[None, None, :]), axis=2) # (S,A)
-        V_new = jnp.max(Q, axis=1)
+        V_new = jnp.max(jnp.sum(P * (R + gamma * V[None, None, :]), axis=2)) # (S,A)
         if jnp.max(jnp.abs(V_new - V)) < tolerance:
             V = V_new
             break
