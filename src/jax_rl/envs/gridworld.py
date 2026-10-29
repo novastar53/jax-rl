@@ -20,7 +20,12 @@ class Gridworld(Environment):
         self.num_actions = len(Action)
 
     def reset(self, key):
-        env_state = jnp.array(5, dtype=jnp.int32)
+        env_state = jax.random.randint(
+            key,
+            shape=(),
+            minval=1,
+            maxval=self.size**2 - 1,
+        )
         observation = env_state
         return env_state, observation
 
