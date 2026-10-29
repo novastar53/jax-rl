@@ -21,7 +21,7 @@ def value_iteration(
     num_states, _, _ = P.shape
     V = jnp.zeros(num_states,) # (S,)
     for _ in range(max_iterations):
-        V_new = jnp.max(jnp.sum(P * (R + gamma * V[None, None, :]), axis=2)) # (S,A)
+        V_new = jnp.max(jnp.sum(P * (R + gamma * V[None, None, :]), axis=2), axis=1) # (S,)
         if jnp.max(jnp.abs(V_new - V)) < tolerance:
             V = V_new
             break
