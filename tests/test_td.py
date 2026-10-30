@@ -1,3 +1,4 @@
+from jax_rl.envs.gridworld import Gridworld
 import pytest
 import jax
 import jax.numpy as jnp
@@ -57,6 +58,38 @@ def test_td0_zero_learning_rate():
 
 
 from jax_rl.td.td_prediction import td0_prediction
+
+
+
+class JaxFixedEpisodeEnv:
+    """
+    Deterministic two-transition environment:
+
+        S0 --(+2)--> S1 --(+4)--> Terminal
+    """
+
+    def reset(self, key):
+        state = jnp.array(0, dtype=jnp.int32)
+        return state, state
+
+    def step(self, key, env_state, action):
+        next_state = env_state + 1
+
+        reward = jnp.where(
+            env_state == 0,
+            2.0,
+            4.0,
+        )
+
+        terminated = next_state == 2
+
+        return (
+            next_state,
+            next_state,
+            reward,
+            terminated,
+            {},
+        )
 
 
 class FixedEpisodeEnv:
@@ -207,3 +240,90 @@ def test_td0_prediction_exact_max_steps():
     )
 
     assert jnp.allclose(V, jnp.array([1.0, 2.0, 0.0]))
+
+
+
+from jax_rl.td.td_prediction import (
+    td0_prediction,
+    td0_prediction_jit,
+)
+
+
+def test_td0_jit_matches_reference():
+    env = JaxFixedEpisodeEnv()
+    policy = jnp.ones((3, 1))
+    key = jax.random.key(42)
+
+    reference = td0_prediction(
+        env,
+        policy,
+        key,
+        num_episodes=10,
+        alpha=0.1,
+        gamma=0.9,
+    )
+
+    compiled = td0_prediction_jit(
+        env,
+        policy,
+        key,
+        num_episodes=10,
+        alpha=0.1,
+        gamma=0.9,
+    )
+
+    assert jnp.allclose(reference, compiled, atol=1e-6)
+
+
+def test_td0_jit_max_steps():
+    env = JaxFixedEpisodeEnv()
+    policy = jnp.ones((3, 1))
+
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        td0_prediction_jit(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            max_steps=1,
+        )
+
+
+def test_td0_jit_zero_episodes():
+    env = JaxFixedEpisodeEnv()
+    policy = jnp.ones((3, 1))
+
+    result = td0_prediction_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+    )
+
+    assert jnp.array_equal(result, jnp.zeros(3))
+
+
+def test_td0_jit_gridworld_matches_reference():
+    env = Gridworld(size=4)
+    policy = jnp.full((16, 4), 0.25)
+    key = jax.random.key(42)
+
+    reference = td0_prediction(
+        env,
+        policy,
+        key,
+        num_episodes=100,
+        alpha=0.1,
+        gamma=1.0,
+    )
+
+    compiled = td0_prediction_jit(
+        env,
+        policy,
+        key,
+        num_episodes=100,
+        alpha=0.1,
+        gamma=1.0,
+    )
+
+    assert jnp.allclose(reference, compiled, atol=1e-5)

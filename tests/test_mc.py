@@ -320,3 +320,114 @@ def test_mc_prediction_every_visit():
 
     assert jnp.allclose(V, expected_V)
     assert jnp.array_equal(N, expected_N)
+
+
+from jax_rl.envs.gridworld import Gridworld
+from jax_rl.mc.mc_prediction import mc_prediction, mc_prediction_jit
+
+
+@pytest.mark.parametrize("visit_mode", ["first", "every"])
+@pytest.mark.parametrize("gamma", [1.0, 0.5])
+def test_mc_jit_matches_reference(visit_mode, gamma):
+    env = Gridworld(size=4)
+    policy = jnp.full((16, 4), 0.25)
+    key = jax.random.key(42)
+
+    reference_V, reference_N = mc_prediction(
+        env,
+        policy,
+        key,
+        num_episodes=100,
+        gamma=gamma,
+        visit_mode=visit_mode,
+    )
+
+    compiled_V, compiled_N = mc_prediction_jit(
+        env,
+        policy,
+        key,
+        num_episodes=100,
+        gamma=gamma,
+        visit_mode=visit_mode,
+    )
+
+    assert jnp.array_equal(reference_N, compiled_N)
+    assert jnp.allclose(
+        reference_V,
+        compiled_V,
+        atol=1e-4,
+        rtol=1e-5,
+    )
+
+
+@pytest.mark.parametrize("visit_mode", ["first", "every"])
+def test_mc_jit_zero_episodes(visit_mode):
+    env = Gridworld(size=4)
+    policy = jnp.full((16, 4), 0.25)
+
+    V, N = mc_prediction_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+        visit_mode=visit_mode,
+    )
+
+    assert jnp.array_equal(V, jnp.zeros(16))
+    assert jnp.array_equal(N, jnp.zeros(16))
+
+
+def test_mc_jit_max_steps():
+    env = Gridworld(size=4)
+    policy = jnp.full((16, 4), 0.25)
+
+    # A one-step episode is not guaranteed to terminate.
+    # Use a reproducible batch and a strict step limit.
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        mc_prediction_jit(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=100,
+            max_steps=1,
+        )
+
+
+def test_mc_jit_invalid_visit_mode():
+    env = Gridworld(size=4)
+    policy = jnp.full((16, 4), 0.25)
+
+    with pytest.raises(ValueError, match="visit_mode"):
+        mc_prediction_jit(
+            env,
+            policy,
+            jax.random.key(42),
+            visit_mode="invalid",
+        )
+
+
+
+@pytest.mark.parametrize("visit_mode", ["first", "every"])
+def test_mc_jit_single_episode_matches_reference(visit_mode):
+    env = Gridworld(size=4)
+    policy = jnp.full((16, 4), 0.25)
+    key = jax.random.key(42)
+
+    V_ref, N_ref = mc_prediction(
+        env,
+        policy,
+        key,
+        num_episodes=1,
+        visit_mode=visit_mode,
+    )
+
+    V_jit, N_jit = mc_prediction_jit(
+        env,
+        policy,
+        key,
+        num_episodes=1,
+        visit_mode=visit_mode,
+    )
+
+    assert jnp.array_equal(N_ref, N_jit)
+    assert jnp.allclose(V_ref, V_jit, atol=1e-5)
