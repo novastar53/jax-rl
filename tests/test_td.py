@@ -327,3 +327,229 @@ def test_td0_jit_gridworld_matches_reference():
     )
 
     assert jnp.allclose(reference, compiled, atol=1e-5)
+
+
+
+class SarsaTestEnv:
+    """
+    Deterministic two-step environment:
+
+        S0 --(+2)--> S1 --(+4)--> Terminal
+
+    The environment records the actions executed.
+    """
+
+    num_states = 3
+    num_actions = 2
+
+    def __init__(self):
+        self.actions_taken = []
+
+    def reset(self, key):
+        return 0, 0
+
+    def step(self, key, env_state, action):
+        self.actions_taken.append(int(action))
+
+        if env_state == 0:
+            return 1, 1, 2.0, False, {}
+
+        if env_state == 1:
+            return 2, 2, 4.0, True, {}
+
+        raise RuntimeError("Cannot step after termination")
+
+
+class FixedActionPolicy:
+    """Always selects a specified action."""
+
+    def __init__(self, action):
+        self.action = action
+
+    def select_action(self, key, q_values):
+        return jnp.int32(self.action)
+
+
+class AlternatingActionPolicy:
+    """
+    Selects action 0 in state 0 and action 1 in state 1.
+
+    In these tests, state 0 has equal Q-values initially,
+    while state 1 has different Q-values after learning.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def select_action(self, key, q_values):
+        action = self.calls % 2
+        self.calls += 1
+        return jnp.int32(action)
+
+
+from jax_rl.td.sarsa import sarsa
+
+
+def test_sarsa_terminal_update():
+    """A terminal transition must not bootstrap."""
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    # S0 -> S1: Q[0,0] = 0.5 * 2 = 1
+    # S1 -> terminal: Q[1,0] = 0.5 * 4 = 2
+    expected = jnp.array([
+        [1.0, 0.0],
+        [2.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_sarsa_bootstraps_across_episodes():
+    """Previously learned next-state values affect updates."""
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    # After episode 1:
+    # Q[0,0] = 1, Q[1,0] = 2
+    #
+    # Episode 2:
+    # Q[0,0] = 1 + 0.5 * (2 + 2 - 1) = 2.5
+    # Q[1,0] = 2 + 0.5 * (4 - 2) = 3
+    expected = jnp.array([
+        [2.5, 0.0],
+        [3.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_sarsa_discounting():
+    """Gamma must discount the bootstrapped action value."""
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        alpha=0.5,
+        gamma=0.5,
+    )
+
+    # Episode 1: Q[0,0] = 1, Q[1,0] = 2
+    #
+    # Episode 2:
+    # Target at S0 = 2 + 0.5 * 2 = 3
+    # Q[0,0] = 1 + 0.5 * (3 - 1) = 2
+    # Q[1,0] = 3
+    expected = jnp.array([
+        [2.0, 0.0],
+        [3.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_sarsa_uses_next_selected_action():
+    """The next action must be carried into the next step."""
+    env = SarsaTestEnv()
+    policy = AlternatingActionPolicy()
+
+    Q = sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    # First selection: action 0 at S0.
+    # Second selection: action 1 at S1.
+    assert env.actions_taken == [0, 1]
+    assert policy.calls == 2
+
+    expected = jnp.array([
+        [1.0, 0.0],
+        [0.0, 2.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_sarsa_zero_episodes():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+    )
+
+    assert jnp.array_equal(Q, jnp.zeros((3, 2)))
+    assert env.actions_taken == []
+
+
+def test_sarsa_max_steps():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    # The environment requires two transitions.
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        sarsa(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            max_steps=1,
+        )
+
+
+def test_sarsa_exact_max_steps():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+        max_steps=2,
+    )
+
+    expected = jnp.array([
+        [1.0, 0.0],
+        [2.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+    assert env.actions_taken == [0, 0]
+
