@@ -21,7 +21,7 @@ def compute_returns(rewards, gamma=1.0):
     return returns
 
 
-def update_mc_values(V, N, states, returns, visit_mode="first"):
+def update_mc_values(V, N, states, returns, visit_mode="first", alpha=None):
     """
     Update MC state-value estimates from one complete episode.
 
@@ -48,9 +48,10 @@ def update_mc_values(V, N, states, returns, visit_mode="first"):
             seen_states.add(s)
 
         count = N[s] + 1
+        step_size = 1.0 / count if alpha is None else alpha
 
         V = V.at[s].set(
-            V[s] + (G - V[s]) / count
+            V[s] + step_size * (G - V[s]) 
         )
         N = N.at[s].set(count)
 
@@ -66,6 +67,7 @@ def mc_prediction(
     visit_mode="first",
     callback=None,
     callback_every=50,
+    alpha=None,
 ):
     """
     Monte Carlo state-value prediction.
@@ -98,7 +100,7 @@ def mc_prediction(
         returns = compute_returns(rewards, gamma)
 
         V, N = update_mc_values(
-            V, N, states, returns, visit_mode
+            V, N, states, returns, visit_mode, alpha
         )
 
         if callback is not None and (
@@ -128,6 +130,7 @@ def _mc_prediction_compiled(
     gamma,
     max_steps,
     visit_mode,
+    alpha,
 ):
     num_states, num_actions = policy.shape
 
@@ -263,8 +266,13 @@ def _mc_prediction_compiled(
                 V, N = values
 
                 count = N[s] + 1
+                step_size = (
+                        1.0 / count
+                        if alpha is None
+                        else alpha
+                    )
                 V = V.at[s].set(
-                    V[s] + (G - V[s]) / count
+                    V[s] + step_size * (G - V[s]) 
                 )
                 N = N.at[s].set(count)
 
@@ -325,6 +333,7 @@ def mc_prediction_jit(
     gamma=1.0,
     visit_mode="first",
     max_steps=1000,
+    alpha=None,
 ):
     """
     JIT-compiled Monte Carlo state-value prediction.
@@ -354,6 +363,7 @@ def mc_prediction_jit(
         gamma,
         max_steps,
         visit_mode,
+        alpha,
     )
 
     if bool(failed):

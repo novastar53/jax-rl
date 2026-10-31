@@ -431,3 +431,83 @@ def test_mc_jit_single_episode_matches_reference(visit_mode):
 
     assert jnp.array_equal(N_ref, N_jit)
     assert jnp.allclose(V_ref, V_jit, atol=1e-5)
+
+
+@pytest.mark.parametrize("visit_mode", ["first", "every"])
+def test_mc_jit_constant_alpha_matches_reference(visit_mode):
+    env = Gridworld(size=4)
+    policy = jnp.full((16, 4), 0.25)
+    key = jax.random.key(42)
+
+    V_ref, N_ref = mc_prediction(
+        env,
+        policy,
+        key,
+        num_episodes=100,
+        gamma=1.0,
+        visit_mode=visit_mode,
+        alpha=0.1,
+    )
+
+    V_jit, N_jit = mc_prediction_jit(
+        env,
+        policy,
+        key,
+        num_episodes=100,
+        gamma=1.0,
+        visit_mode=visit_mode,
+        alpha=0.1,
+    )
+
+    assert jnp.array_equal(N_ref, N_jit)
+    assert jnp.allclose(V_ref, V_jit, atol=1e-4)
+
+
+from jax_rl.mc.mc_prediction import update_mc_values
+
+
+def test_mc_constant_alpha_update():
+    V = jnp.zeros(3)
+    N = jnp.zeros(3, dtype=jnp.int32)
+
+    states = jnp.array([0, 1, 0])
+    returns = jnp.array([10.0, 5.0, 2.0])
+
+    V, N = update_mc_values(
+        V,
+        N,
+        states,
+        returns,
+        visit_mode="every",
+        alpha=0.1,
+    )
+
+    # State 0:
+    # First update: 0 + 0.1 * 10 = 1
+    # Second update: 1 + 0.1 * (2 - 1) = 1.1
+    #
+    # State 1:
+    # 0 + 0.1 * 5 = 0.5
+
+    assert jnp.allclose(V, jnp.array([1.1, 0.5, 0.0]))
+    assert jnp.array_equal(N, jnp.array([2, 1, 0]))
+
+
+def test_mc_first_visit_constant_alpha():
+    V = jnp.zeros(3)
+    N = jnp.zeros(3, dtype=jnp.int32)
+
+    states = jnp.array([0, 1, 0])
+    returns = jnp.array([10.0, 5.0, 2.0])
+
+    V, N = update_mc_values(
+        V,
+        N,
+        states,
+        returns,
+        visit_mode="first",
+        alpha=0.1,
+    )
+
+    assert jnp.allclose(V, jnp.array([1.0, 0.5, 0.0]))
+    assert jnp.array_equal(N, jnp.array([1, 1, 0]))
