@@ -553,3 +553,210 @@ def test_sarsa_exact_max_steps():
     assert jnp.allclose(Q, expected)
     assert env.actions_taken == [0, 0]
 
+
+
+class AlternatingPolicy:
+    def __init__(self):
+        self.calls = 0
+
+    def select_action(self, key, q_values):
+        action = self.calls % 2
+        self.calls += 1
+        return jnp.int32(action)
+
+
+from jax_rl.td.q_learning import q_learning
+
+
+def test_q_learning_terminal_update():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = q_learning(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    # S0 -> S1, reward = 2
+    # Q[0,0] = 0 + 0.5 * 2 = 1
+    #
+    # S1 -> terminal, reward = 4
+    # Q[1,0] = 0 + 0.5 * 4 = 2
+
+    expected = jnp.array([
+        [1.0, 0.0],
+        [2.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_q_learning_bootstraps_across_episodes():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = q_learning(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    # After episode 1:
+    # Q[0,0] = 1, Q[1,0] = 2
+    #
+    # Episode 2:
+    # Target at S0 = 2 + max(Q[1]) = 4
+    # Q[0,0] = 1 + 0.5 * (4 - 1) = 2.5
+    # Q[1,0] = 2 + 0.5 * (4 - 2) = 3
+
+    expected = jnp.array([
+        [2.5, 0.0],
+        [3.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_q_learning_discounting():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = q_learning(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        alpha=0.5,
+        gamma=0.5,
+    )
+
+    # Episode 1: Q[0,0] = 1, Q[1,0] = 2
+    #
+    # Episode 2:
+    # Target at S0 = 2 + 0.5 * 2 = 3
+    # Q[0,0] = 1 + 0.5 * (3 - 1) = 2
+    # Q[1,0] = 3
+
+    expected = jnp.array([
+        [2.0, 0.0],
+        [3.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_q_learning_uses_greedy_target():
+    """
+    Q-learning must bootstrap from the maximum next-state
+    action value, even when the behavior policy selects
+    a different action.
+    """
+    env = SarsaTestEnv()
+    policy = AlternatingPolicy()
+
+    Q = q_learning(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=3,
+        alpha=1.0,
+        gamma=1.0,
+    )
+
+    # Episode 1: actions 0, 1
+    # Q[0,0] = 2, Q[1,1] = 4
+    #
+    # Episode 2: actions 0, 1
+    # Q[0,0] = 2 + max(Q[1]) = 6
+    #
+    # Episode 3: actions 0, 1
+    # Q[0,0] remains 6
+
+    expected = jnp.array([
+        [6.0, 0.0],
+        [0.0, 4.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_q_learning_selects_new_actions():
+    env = SarsaTestEnv()
+    policy = AlternatingPolicy()
+
+    q_learning(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+    )
+
+    assert env.actions_taken == [0, 1]
+    assert policy.calls == 2
+
+
+def test_q_learning_zero_episodes():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = q_learning(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+    )
+
+    assert jnp.array_equal(
+        Q,
+        jnp.zeros((3, 2), dtype=jnp.float32),
+    )
+    assert env.actions_taken == []
+
+
+def test_q_learning_max_steps():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        q_learning(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            max_steps=1,
+        )
+
+
+def test_q_learning_exact_max_steps():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = q_learning(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+        max_steps=2,
+    )
+
+    expected = jnp.array([
+        [1.0, 0.0],
+        [2.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+    assert env.actions_taken == [0, 0]
