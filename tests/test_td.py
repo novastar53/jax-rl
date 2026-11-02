@@ -760,3 +760,57 @@ def test_q_learning_exact_max_steps():
 
     assert jnp.allclose(Q, expected)
     assert env.actions_taken == [0, 0]
+
+
+
+def test_q_learning_off_policy_bootstrap():
+    """
+    The behavior policy takes action 0 at S1, but
+    action 1 has the greater Q-value.
+
+    Q-learning must use Q[S1, 1] in its target.
+    """
+    env = SarsaTestEnv()
+
+    class NonGreedyPolicy:
+        def __init__(self):
+            self.calls = 0
+
+        def select_action(self, key, q_values):
+            # First episode: action 1 at both states.
+            # Second episode: action 0 at both states.
+            episode = self.calls // 2
+            self.calls += 1
+            return jnp.int32(1 if episode == 0 else 0)
+
+    policy = NonGreedyPolicy()
+
+    Q = q_learning(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        alpha=1.0,
+        gamma=1.0,
+    )
+
+    # Episode 1:
+    # Q[0,1] = 2
+    # Q[1,1] = 4
+    #
+    # Episode 2:
+    # Behavior selects action 0 at S0 and S1.
+    # But at S1, max(Q[1]) = Q[1,1] = 4.
+    #
+    # Therefore:
+    # Q[0,0] = 2 + 4 = 6
+    # Q[1,0] = 4
+
+    expected = jnp.array([
+        [6.0, 2.0],
+        [4.0, 4.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+    assert env.actions_taken == [1, 1, 0, 0]

@@ -285,3 +285,106 @@ def test_jit_compatibility(env):
     assert reward.shape == ()
     assert not bool(terminated)
     assert info == {}
+
+
+from jax_rl.envs.cliff_walking import CliffWalking
+from jax_rl.envs.gridworld import Action
+
+
+def test_cliff_reset():
+    env = CliffWalking()
+
+    state, observation = env.reset(jax.random.key(42))
+
+    assert int(state) == 36
+    assert int(observation) == 36
+
+
+def test_cliff_fall():
+    env = CliffWalking()
+    key = jax.random.key(42)
+
+    next_state, observation, reward, terminated, _ = env.step(
+        key,
+        jnp.int32(36),
+        Action.RIGHT,
+    )
+
+    assert int(next_state) == 36
+    assert int(observation) == 36
+    assert float(reward) == -100.0
+    assert not bool(terminated)
+
+
+def test_cliff_safe_move():
+    env = CliffWalking()
+
+    next_state, _, reward, terminated, _ = env.step(
+        jax.random.key(42),
+        jnp.int32(36),
+        Action.UP,
+    )
+
+    assert int(next_state) == 24
+    assert float(reward) == -1.0
+    assert not bool(terminated)
+
+
+def test_cliff_goal():
+    env = CliffWalking()
+
+    next_state, _, reward, terminated, _ = env.step(
+        jax.random.key(42),
+        jnp.int32(35),
+        Action.DOWN,
+    )
+
+    assert int(next_state) == 47
+    assert float(reward) == -1.0
+    assert bool(terminated)
+
+
+def test_cliff_boundaries():
+    env = CliffWalking()
+
+    next_state, _, reward, terminated, _ = env.step(
+        jax.random.key(42),
+        jnp.int32(0),
+        Action.UP,
+    )
+
+    assert int(next_state) == 0
+    assert float(reward) == -1.0
+    assert not bool(terminated)
+
+
+def test_cliff_goal_is_absorbing():
+    env = CliffWalking()
+
+    next_state, _, reward, terminated, _ = env.step(
+        jax.random.key(42),
+        jnp.int32(47),
+        Action.LEFT,
+    )
+
+    assert int(next_state) == 47
+    assert float(reward) == 0.0
+    assert bool(terminated)
+
+
+def test_cliff_step_jit():
+    env = CliffWalking()
+
+    compiled_step = jax.jit(env.step)
+
+    result = compiled_step(
+        jax.random.key(42),
+        jnp.int32(36),
+        jnp.int32(Action.RIGHT),
+    )
+
+    next_state, _, reward, terminated, _ = result
+
+    assert int(next_state) == 36
+    assert float(reward) == -100.0
+    assert not bool(terminated)
