@@ -23,7 +23,7 @@ def sarsa(
         env_state, observation = env.reset(env_key)
         action = policy.select_action(action_key, Q[observation])
         for _ in range(max_steps):
-            key, action_key, env_key = jax.random.split(key, 3)
+            key, env_key, action_key = jax.random.split(key, 3)
             old_q = Q[observation, action]
             new_state, new_observation, reward, terminated, _ = env.step(env_key, env_state, action)
             if bool(terminated):
@@ -40,3 +40,38 @@ def sarsa(
                 f"Episode did not terminate within {max_steps} steps"
             )
     return Q
+
+
+
+from jax_rl.td.control_jit import train_control_jit
+
+
+def sarsa_jit(
+    env,
+    policy,
+    key,
+    num_episodes=10_000,
+    alpha=0.1,
+    gamma=1.0,
+    max_steps=1000,
+    return_history=False,
+    truncate=False,
+):
+    """
+    JIT-compiled on-policy SARSA control.
+
+    Returns:
+        Q, or (Q, episode_returns) if return_history=True.
+    """
+    return train_control_jit(
+        env,
+        policy,
+        key,
+        num_episodes=num_episodes,
+        alpha=alpha,
+        gamma=gamma,
+        max_steps=max_steps,
+        algorithm="sarsa",
+        return_history=return_history,
+        truncate=truncate,
+    )

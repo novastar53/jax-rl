@@ -814,3 +814,229 @@ def test_q_learning_off_policy_bootstrap():
 
     assert jnp.allclose(Q, expected)
     assert env.actions_taken == [1, 1, 0, 0]
+
+
+from jax_rl.envs.gridworld import Gridworld
+from jax_rl.envs.cliff_walking import CliffWalking
+from jax_rl.td.sarsa import sarsa
+from jax_rl.td.q_learning import q_learning
+from jax_rl.td.sarsa import sarsa_jit
+from jax_rl.td.q_learning import q_learning_jit
+from jax_rl.utils.policies import EpsilonGreedyPolicy
+
+
+@pytest.mark.parametrize(
+    "reference, compiled",
+    [
+        (sarsa, sarsa_jit),
+        (q_learning, q_learning_jit),
+    ],
+)
+def test_control_jit_matches_reference(reference, compiled):
+    env = Gridworld(size=4)
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+    key = jax.random.key(42)
+
+    Q_reference = reference(
+        env,
+        policy,
+        key,
+        num_episodes=20,
+        alpha=0.1,
+        gamma=1.0,
+    )
+
+    Q_compiled = compiled(
+        env,
+        policy,
+        key,
+        num_episodes=20,
+        alpha=0.1,
+        gamma=1.0,
+    )
+
+    assert jnp.allclose(
+        Q_reference,
+        Q_compiled,
+        atol=1e-5,
+    )
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    [sarsa_jit, q_learning_jit],
+)
+def test_control_jit_zero_episodes(algorithm):
+    env = Gridworld(size=4)
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q, rewards = algorithm(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+        return_history=True,
+    )
+
+    assert jnp.array_equal(
+        Q,
+        jnp.zeros((16, 4), dtype=jnp.float32),
+    )
+    assert rewards.shape == (0,)
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    [sarsa_jit, q_learning_jit],
+)
+def test_control_jit_cliff_walking(algorithm):
+    env = CliffWalking()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q, rewards = algorithm(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=20,
+        alpha=0.5,
+        max_steps=1000,
+        return_history=True,
+    )
+
+    assert Q.shape == (48, 4)
+    assert rewards.shape == (20,)
+    assert bool(jnp.all(jnp.isfinite(Q)))
+    assert bool(jnp.all(rewards <= -1))
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    [sarsa_jit, q_learning_jit],
+)
+def test_control_jit_max_steps(algorithm):
+    env = CliffWalking()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        algorithm(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            max_steps=1,
+        )
+
+
+
+def test_sarsa_jit_single_episode():
+    env = Gridworld(size=4)
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+    key = jax.random.key(42)
+
+    Q_reference = sarsa(
+        env,
+        policy,
+        key,
+        num_episodes=1,
+        alpha=0.1,
+        gamma=1.0,
+    )
+
+    Q_compiled = sarsa_jit(
+        env,
+        policy,
+        key,
+        num_episodes=1,
+        alpha=0.1,
+        gamma=1.0,
+    )
+
+    assert jnp.allclose(
+        Q_reference,
+        Q_compiled,
+        atol=1e-6,
+    )
+
+
+
+class NeverTerminatingEnv:
+    """
+    Single-state environment that never terminates.
+
+    Every transition returns to state 0 with reward -1.
+    """
+
+    num_states = 1
+    num_actions = 1
+
+    def reset(self, key):
+        state = jnp.int32(0)
+        return state, state
+
+    def step(self, key, env_state, action):
+        return (
+            jnp.int32(0),
+            jnp.int32(0),
+            jnp.float32(-1.0),
+            jnp.bool_(False),
+            {},
+        )
+
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    [sarsa_jit, q_learning_jit],
+)
+def test_control_jit_truncation(algorithm):
+    env = NeverTerminatingEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q, episode_returns = algorithm(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=3,
+        alpha=0.1,
+        gamma=1.0,
+        max_steps=5,
+        return_history=True,
+        truncate=True,
+    )
+
+    expected_returns = jnp.array(
+        [-5.0, -5.0, -5.0],
+        dtype=jnp.float32,
+    )
+
+    assert jnp.array_equal(
+        episode_returns,
+        expected_returns,
+    )
+
+    assert Q.shape == (1, 1)
+    assert jnp.all(jnp.isfinite(Q))
+
+
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    [sarsa_jit, q_learning_jit],
+)
+def test_control_jit_truncation_disabled(algorithm):
+    env = NeverTerminatingEnv()
+    policy = FixedActionPolicy(action=0)
+
+    with pytest.raises(
+        RuntimeError,
+        match="did not terminate",
+    ):
+        algorithm(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=3,
+            max_steps=5,
+            truncate=False,
+        )

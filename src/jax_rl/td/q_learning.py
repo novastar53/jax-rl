@@ -49,3 +49,39 @@ def q_learning(
                 f"Episode did not terminate within {max_steps} steps"
             )
     return Q
+
+
+
+
+from jax_rl.td.control_jit import train_control_jit
+
+
+def q_learning_jit(
+    env,
+    policy,
+    key,
+    num_episodes=10_000,
+    alpha=0.1,
+    gamma=1.0,
+    max_steps=1000,
+    return_history=False,
+    truncate=False,
+):
+    """
+    JIT-compiled off-policy Q-learning control.
+
+    Returns:
+        Q, or (Q, episode_returns) if return_history=True.
+    """
+    return train_control_jit(
+        env,
+        policy,
+        key,
+        num_episodes=num_episodes,
+        alpha=alpha,
+        gamma=gamma,
+        max_steps=max_steps,
+        algorithm="q_learning",
+        return_history=return_history,
+        truncate=truncate,
+    )
