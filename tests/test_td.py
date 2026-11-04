@@ -369,6 +369,11 @@ class FixedActionPolicy:
     def select_action(self, key, q_values):
         return jnp.int32(self.action)
 
+    def action_probs(self, q_values):
+        return jax.nn.one_hot(
+            self.action,
+            q_values.shape[0],
+        )
 
 class AlternatingActionPolicy:
     """
@@ -385,6 +390,12 @@ class AlternatingActionPolicy:
         action = self.calls % 2
         self.calls += 1
         return jnp.int32(action)
+
+    def action_probs(self, q_values):
+        return jnp.full(
+        q_values.shape,
+        1.0 / q_values.shape[0],
+        )
 
 
 from jax_rl.td.sarsa import sarsa
@@ -1040,3 +1051,285 @@ def test_control_jit_truncation_disabled(algorithm):
             max_steps=5,
             truncate=False,
         )
+
+
+class FixedProbabilityPolicy:
+    def __init__(self, probs):
+        self.probs = jnp.asarray(probs, dtype=jnp.float32)
+
+    def action_probs(self, q_values):
+        return self.probs
+
+
+from jax_rl.td.expected_sarsa import expected_sarsa_update
+
+
+
+def test_expected_sarsa_update():
+    Q = jnp.array([
+        [2.0, 4.0, 6.0],
+        [1.0, 5.0, 9.0],
+    ])
+
+    policy = FixedProbabilityPolicy(
+        jnp.array([0.2, 0.3, 0.5])
+    )
+
+    result = expected_sarsa_update(
+        Q,
+        state=0,
+        action=1,
+        reward=2.0,
+        next_state=1,
+        terminated=False,
+        policy=policy,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    # Expected next-state value:
+    # 0.2 * 1 + 0.3 * 5 + 0.5 * 9 = 6.2
+    #
+    # Target = 2 + 6.2 = 8.2
+    # TD error = 8.2 - 4 = 4.2
+    # Updated Q[0, 1] = 4 + 0.5 * 4.2 = 6.1
+
+    expected = jnp.array([
+        [2.0, 6.1, 6.0],
+        [1.0, 5.0, 9.0],
+    ])
+
+    assert jnp.allclose(result, expected)
+
+
+def test_expected_sarsa_discounting():
+    Q = jnp.array([
+        [2.0, 4.0, 6.0],
+        [1.0, 5.0, 9.0],
+    ])
+
+    policy = FixedProbabilityPolicy(
+        jnp.array([0.2, 0.3, 0.5])
+    )
+
+    result = expected_sarsa_update(
+        Q,
+        state=0,
+        action=1,
+        reward=2.0,
+        next_state=1,
+        terminated=False,
+        policy=policy,
+        alpha=0.5,
+        gamma=0.5,
+    )
+
+    # Expected next-state value = 6.2
+    # Target = 2 + 0.5 * 6.2 = 5.1
+    # Updated Q[0, 1] = 4 + 0.5 * (5.1 - 4) = 4.55
+
+    expected = jnp.array([
+        [2.0, 4.55, 6.0],
+        [1.0, 5.0, 9.0],
+    ])
+
+    assert jnp.allclose(result, expected)
+
+
+def test_expected_sarsa_terminal_update():
+    Q = jnp.array([
+        [2.0, 4.0, 6.0],
+        [1.0, 5.0, 9.0],
+    ])
+
+    policy = FixedProbabilityPolicy(
+        jnp.array([0.2, 0.3, 0.5])
+    )
+
+    result = expected_sarsa_update(
+        Q,
+        state=0,
+        action=1,
+        reward=-2.0,
+        next_state=1,
+        terminated=True,
+        policy=policy,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    # Terminal target = -2
+    # Updated Q[0, 1] = 4 + 0.5 * (-2 - 4) = 1
+
+    expected = jnp.array([
+        [2.0, 1.0, 6.0],
+        [1.0, 5.0, 9.0],
+    ])
+
+    assert jnp.allclose(result, expected)
+
+
+def test_expected_sarsa_zero_learning_rate():
+    Q = jnp.array([
+        [2.0, 4.0, 6.0],
+        [1.0, 5.0, 9.0],
+    ])
+
+    policy = FixedProbabilityPolicy(
+        jnp.array([0.2, 0.3, 0.5])
+    )
+
+    result = expected_sarsa_update(
+        Q,
+        state=0,
+        action=1,
+        reward=2.0,
+        next_state=1,
+        terminated=False,
+        policy=policy,
+        alpha=0.0,
+        gamma=1.0,
+    )
+
+    assert jnp.array_equal(result, Q)
+
+
+
+from jax_rl.td.expected_sarsa import expected_sarsa
+
+
+def test_expected_sarsa_control_single_episode():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = expected_sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    expected = jnp.array([
+        [1.0, 0.0],
+        [2.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_expected_sarsa_control_bootstrapping():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = expected_sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    expected = jnp.array([
+        [2.5, 0.0],
+        [3.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_expected_sarsa_control_discounting():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = expected_sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        alpha=0.5,
+        gamma=0.5,
+    )
+
+    expected = jnp.array([
+        [2.0, 0.0],
+        [3.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_expected_sarsa_control_action_selection():
+    env = SarsaTestEnv()
+    policy = AlternatingActionPolicy()
+
+    Q = expected_sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+    )
+
+    assert env.actions_taken == [0, 1]
+    assert policy.calls == 2
+
+    assert Q.shape == (3, 2)
+
+
+def test_expected_sarsa_control_zero_episodes():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = expected_sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+    )
+
+    assert jnp.array_equal(
+        Q,
+        jnp.zeros((3, 2), dtype=jnp.float32),
+    )
+
+
+def test_expected_sarsa_control_max_steps():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        expected_sarsa(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            max_steps=1,
+        )
+
+
+def test_expected_sarsa_control_exact_max_steps():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+
+    Q = expected_sarsa(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+        max_steps=2,
+    )
+
+    expected = jnp.array([
+        [1.0, 0.0],
+        [2.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
