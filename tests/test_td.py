@@ -1333,3 +1333,99 @@ def test_expected_sarsa_control_exact_max_steps():
     ])
 
     assert jnp.allclose(Q, expected)
+
+
+from jax_rl.td.expected_sarsa import expected_sarsa, expected_sarsa_jit
+
+
+
+@pytest.mark.parametrize("gamma", [0.5, 1.0])
+@pytest.mark.parametrize("num_episodes", [1, 20])
+def test_expected_sarsa_jit_matches_reference(gamma, num_episodes):
+    env = Gridworld(size=4)
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+    key = jax.random.key(42)
+
+    Q_reference = expected_sarsa(
+        env,
+        policy,
+        key,
+        num_episodes=num_episodes,
+        alpha=0.1,
+        gamma=gamma,
+    )
+
+    Q_compiled = expected_sarsa_jit(
+        env,
+        policy,
+        key,
+        num_episodes=num_episodes,
+        alpha=0.1,
+        gamma=gamma,
+    )
+
+    assert jnp.allclose(
+        Q_reference,
+        Q_compiled,
+        atol=1e-5,
+    )
+
+
+
+def test_expected_sarsa_jit_zero_episodes():
+    env = Gridworld(size=4)
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q = expected_sarsa_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+    )
+
+    expected = jnp.zeros(
+        (env.num_states, env.num_actions),
+        dtype=jnp.float32,
+    )
+
+    assert jnp.array_equal(Q, expected)
+
+
+
+def test_expected_sarsa_jit_max_steps():
+    env = CliffWalking()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        expected_sarsa_jit(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            max_steps=1,
+        )
+
+
+
+def test_expected_sarsa_jit_cliff_walking():
+    env = CliffWalking()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q, episode_returns = expected_sarsa_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=20,
+        alpha=0.5,
+        gamma=1.0,
+        max_steps=1000,
+        return_history=True,
+        truncate=True,
+    )
+
+    assert Q.shape == (env.num_states, env.num_actions)
+    assert episode_returns.shape == (20,)
+
+    assert bool(jnp.all(jnp.isfinite(Q)))
+    assert bool(jnp.all(jnp.isfinite(episode_returns)))
+    assert bool(jnp.all(episode_returns <= -1))

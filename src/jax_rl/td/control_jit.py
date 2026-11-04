@@ -101,7 +101,32 @@ def _train_control(
                 Q = Q.at[state, action].add(
                     alpha * (target - Q[state, action])
                 )
+            elif algorithm == "expected_sarsa":
+                def nonterminal_target(_):
+                    target = reward + gamma * jnp.dot(Q[next_state], 
+                                                      policy.action_probs(Q[next_state]))
+                    return target
 
+                target = jax.lax.cond(
+                    terminated,
+                    lambda _: reward,
+                    nonterminal_target,
+                    operand=None,
+                )
+
+                Q = Q.at[state, action].add(
+                    alpha * (target - Q[state, action])
+                )
+
+                next_action = jax.lax.cond(
+                    terminated,
+                    lambda _: jnp.int32(0),
+                    lambda _: policy.select_action(
+                            action_key,
+                            Q[next_state],
+                    ),
+                    operand=None,
+                )
             else:
                 # Q-learning bootstraps from the
                 # maximum next-state action value.
@@ -193,7 +218,7 @@ def train_control_jit(
     return_history=False,
     truncate=False,
 ):
-    if algorithm not in ("sarsa", "q_learning"):
+    if algorithm not in ("sarsa", "q_learning", "expected_sarsa"):
         raise ValueError("Unknown control algorithm")
 
     if num_episodes < 0:
