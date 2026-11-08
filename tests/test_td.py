@@ -1429,3 +1429,92 @@ def test_expected_sarsa_jit_cliff_walking():
     assert bool(jnp.all(jnp.isfinite(Q)))
     assert bool(jnp.all(jnp.isfinite(episode_returns)))
     assert bool(jnp.all(episode_returns <= -1))
+
+
+from jax_rl.td.td_prediction import n_step_return
+
+
+class TestNStepReturn:
+    def setup_method(self):
+        self.rewards = jnp.array([1.0, 2.0, 3.0, 4.0])
+        self.values = jnp.array([10.0, 20.0, 30.0, 40.0, 0.0])
+
+    def test_one_step_return(self):
+        result = n_step_return(
+            self.rewards, self.values,
+            t=0, n=1, gamma=0.5,
+        )
+
+        # R_1 + gamma * V(S_1) = 1 + 0.5 * 20
+        assert jnp.isclose(result, 11.0)
+
+    def test_two_step_return(self):
+        result = n_step_return(
+            self.rewards, self.values,
+            t=0, n=2, gamma=0.5,
+        )
+
+        # 1 + 0.5 * 2 + 0.5^2 * 30
+        assert jnp.isclose(result, 9.5)
+
+    def test_bootstrap_discount_relative_to_t(self):
+        result = n_step_return(
+            self.rewards, self.values,
+            t=1, n=2, gamma=0.5,
+        )
+
+        # 2 + 0.5 * 3 + 0.5^2 * 40
+        assert jnp.isclose(result, 13.5)
+
+    def test_return_reaches_terminal_state(self):
+        result = n_step_return(
+            self.rewards, self.values,
+            t=2, n=2, gamma=0.5,
+        )
+
+        # 3 + 0.5 * 4; no bootstrapping at terminal
+        assert jnp.isclose(result, 5.0)
+
+    def test_n_exceeds_remaining_episode(self):
+        result = n_step_return(
+            self.rewards, self.values,
+            t=2, n=5, gamma=0.5,
+        )
+
+        # Only two rewards remain.
+        assert jnp.isclose(result, 5.0)
+
+    def test_gamma_one(self):
+        result = n_step_return(
+            self.rewards, self.values,
+            t=0, n=3, gamma=1.0,
+        )
+
+        # 1 + 2 + 3 + V(S_3)
+        assert jnp.isclose(result, 46.0)
+
+    def test_gamma_zero(self):
+        result = n_step_return(
+            self.rewards, self.values,
+            t=1, n=3, gamma=0.0,
+        )
+
+        # Only the immediate reward contributes.
+        assert jnp.isclose(result, 2.0)
+
+    def test_full_episode_equals_monte_carlo(self):
+        result = n_step_return(
+            self.rewards, self.values,
+            t=0, n=4, gamma=0.5,
+        )
+
+        # 1 + 0.5*2 + 0.25*3 + 0.125*4
+        assert jnp.isclose(result, 3.25)
+
+    def test_single_remaining_reward(self):
+        result = n_step_return(
+            self.rewards, self.values,
+            t=3, n=3, gamma=0.5,
+        )
+
+        assert jnp.isclose(result, 4.0)

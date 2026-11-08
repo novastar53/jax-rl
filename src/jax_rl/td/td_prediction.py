@@ -232,3 +232,62 @@ def td0_prediction_jit(
         )
 
     return V
+
+
+
+def n_step_return(
+    rewards,
+    boostrap_value,
+    t,
+    n,
+    gamma=1.0,
+):
+    """
+    Calculate the n-step return for a finite episode.
+
+    Args:
+        rewards: (T,) rewards R_1, ..., R_T.
+        values: (T+1,) estimates V(S_0), ..., V(S_T).
+                The final state is terminal.
+        t: Starting time step.
+        n: Number of steps to look ahead.
+        gamma: Discount factor.
+
+    Returns:
+        Scalar n-step return.
+    """
+    value = 0
+    for i in range(t, min(t + n, len(rewards))):
+        value += rewards[i] * gamma ** (i - t)
+
+    value += (gamma ** n) * boostrap_value
+
+    return value
+
+
+def n_step_td_prediction(
+    env,
+    policy,
+    key,
+    num_episodes=10_000,
+    n=1,
+    alpha=0.1,
+    gamma=1.0,
+    max_steps=1000,
+):
+    """
+    Returns:
+        V: (S,) estimated state values.
+    """
+    num_states, num_actions = policy.shape
+    V = jnp.zeros(num_states, dtype=jnp.float32)
+    for _ in range(num_episodes):
+        t = 0
+        T = float('inf')
+        key, reset_key = jax.random.split(key)
+        env_state, state = env.reset(reset_key)
+        while True:
+            if t < T:
+
+
+    return V
