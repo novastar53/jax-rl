@@ -279,15 +279,41 @@ def n_step_td_prediction(
     Returns:
         V: (S,) estimated state values.
     """
-    num_states, num_actions = policy.shape
-    V = jnp.zeros(num_states, dtype=jnp.float32)
-    for _ in range(num_episodes):
+    for episode in range(num_episodes):
+        state_buffer = [None] * (n + 1)
+        reward_buffer = [0.0] * n
+
+        terminated = False
         t = 0
-        T = float('inf')
-        key, reset_key = jax.random.split(key)
-        env_state, state = env.reset(reset_key)
+        tau = 0
+        T = 0
+
+        key, env_key = jax.random.split(key)
+        env_state, observation = env.reset(env_key)
+        state_buffer[t % n] = observation
+        num_actions = policy.num_actions
+
         while True:
-            if t < T:
+            if not terminated:
+                key, action_key, step_key = jax.random.split(key)
+                # take one environment step
+                # store reward in reward_buffer
+                # store next_state in state_buffer
+                # increase size
+                action = jax.random.choice(
+                    action_key,
+                    a=num_actions,
+                    p=policy[observation],
+                )
 
+                next_env_state, next_state, reward, terminated, _ = (
+                    env.step(step_key, env_state, action)
+                )
+                reward_buffer[t % n] = reward
+                state_buffer[(t+1) % n] = next_state
 
-    return V
+            if terminated:
+                T = t
+
+            tau = T - n + 1
+
