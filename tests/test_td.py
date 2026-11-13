@@ -1431,90 +1431,241 @@ def test_expected_sarsa_jit_cliff_walking():
     assert bool(jnp.all(episode_returns <= -1))
 
 
-from jax_rl.td.td_prediction import n_step_return
+class NStepTestEnv:
+    """
+    Deterministic trajectory:
+
+    S0 --(+2)--> S1 --(+4)--> S2 (terminal)
+    """
+
+    num_states = 3
+    num_actions = 1
+
+    def reset(self, key):
+        return jnp.int32(0), jnp.int32(0)
+
+    def step(self, key, env_state, action):
+        state = int(env_state)
+
+        if state == 0:
+            return (
+                jnp.int32(1),
+                jnp.int32(1),
+                2.0,
+                False,
+                {},
+            )
+
+        if state == 1:
+            return (
+                jnp.int32(2),
+                jnp.int32(2),
+                4.0,
+                True,
+                {},
+            )
+
+        raise RuntimeError("Stepped after termination")
 
 
-class TestNStepReturn:
+def n_step_test_policy():
+    # One available action in each state.
+    return jnp.ones((3, 1))
+
+
+from jax_rl.td.td_prediction import n_step_td_prediction
+
+
+class TestNStepTDPrediction:
     def setup_method(self):
-        self.rewards = jnp.array([1.0, 2.0, 3.0, 4.0])
-        self.values = jnp.array([10.0, 20.0, 30.0, 40.0, 0.0])
+        self.env = NStepTestEnv()
+        self.policy = n_step_test_policy()
+        self.key = jax.random.key(42)
 
-    def test_one_step_return(self):
-        result = n_step_return(
-            self.rewards, self.values,
-            t=0, n=1, gamma=0.5,
+    def test_one_step_single_episode(self):
+        V = n_step_td_prediction(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            n=1,
+            alpha=0.5,
+            gamma=1.0,
         )
 
-        # R_1 + gamma * V(S_1) = 1 + 0.5 * 20
-        assert jnp.isclose(result, 11.0)
+        # S0: 0 + 0.5 * (2 + V(S1) - 0) = 1
+        # S1: 0 + 0.5 * (4 - 0) = 2
+        expected = jnp.array([1.0, 2.0, 0.0])
 
-    def test_two_step_return(self):
-        result = n_step_return(
-            self.rewards, self.values,
-            t=0, n=2, gamma=0.5,
+        assert jnp.allclose(V, expected)
+
+    def test_two_step_single_episode(self):
+        V = n_step_td_prediction(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            n=2,
+            alpha=0.5,
+            gamma=1.0,
         )
 
-        # 1 + 0.5 * 2 + 0.5^2 * 30
-        assert jnp.isclose(result, 9.5)
+        # S0: 0.5 * (2 + 4) = 3
+        # S1: 0.5 * 4 = 2
+        expected = jnp.array([3.0, 2.0, 0.0])
 
-    def test_bootstrap_discount_relative_to_t(self):
-        result = n_step_return(
-            self.rewards, self.values,
-            t=1, n=2, gamma=0.5,
+        assert jnp.allclose(V, expected)
+
+    def test_n_larger_than_episode(self):
+        V = n_step_td_prediction(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            n=5,
+            alpha=0.5,
+            gamma=1.0,
         )
 
-        # 2 + 0.5 * 3 + 0.5^2 * 40
-        assert jnp.isclose(result, 13.5)
+        # Both updates use complete returns.
+        expected = jnp.array([3.0, 2.0, 0.0])
 
-    def test_return_reaches_terminal_state(self):
-        result = n_step_return(
-            self.rewards, self.values,
-            t=2, n=2, gamma=0.5,
+        assert jnp.allclose(V, expected)
+
+    def test_discounting(self):
+        V = n_step_td_prediction(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            n=2,
+            alpha=0.5,
+            gamma=0.5,
         )
 
-        # 3 + 0.5 * 4; no bootstrapping at terminal
-        assert jnp.isclose(result, 5.0)
+        # S0: 0.5 * (2 + 0.5*4) = 2
+        # S1: 0.5 * 4 = 2
+        expected = jnp.array([2.0, 2.0, 0.0])
 
-    def test_n_exceeds_remaining_episode(self):
-        result = n_step_return(
-            self.rewards, self.values,
-            t=2, n=5, gamma=0.5,
+        assert jnp.allclose(V, expected)
+
+    def test_multiple_episodes(self):
+        V = n_step_td_prediction(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=2,
+            n=2,
+            alpha=0.5,
+            gamma=1.0,
         )
 
-        # Only two rewards remain.
-        assert jnp.isclose(result, 5.0)
+        # Episode 1: V = [3, 2, 0]
+        # Episode 2:
+        # V(S0) = 3 + 0.5*(6 - 3) = 4.5
+        # V(S1) = 2 + 0.5*(4 - 2) = 3
+        expected = jnp.array([4.5, 3.0, 0.0])
 
-    def test_gamma_one(self):
-        result = n_step_return(
-            self.rewards, self.values,
-            t=0, n=3, gamma=1.0,
+        assert jnp.allclose(V, expected)
+
+    def test_zero_episodes(self):
+        V = n_step_td_prediction(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=0,
+            n=2,
         )
 
-        # 1 + 2 + 3 + V(S_3)
-        assert jnp.isclose(result, 46.0)
+        assert jnp.array_equal(V, jnp.zeros(3))
 
-    def test_gamma_zero(self):
-        result = n_step_return(
-            self.rewards, self.values,
-            t=1, n=3, gamma=0.0,
+    def test_exact_max_steps(self):
+        V = n_step_td_prediction(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            n=3,
+            alpha=0.5,
+            max_steps=2,
         )
 
-        # Only the immediate reward contributes.
-        assert jnp.isclose(result, 2.0)
+        expected = jnp.array([3.0, 2.0, 0.0])
+        assert jnp.allclose(V, expected)
 
-    def test_full_episode_equals_monte_carlo(self):
-        result = n_step_return(
-            self.rewards, self.values,
-            t=0, n=4, gamma=0.5,
+    def test_max_steps_exceeded(self):
+        with pytest.raises(RuntimeError, match="did not terminate"):
+            n_step_td_prediction(
+                self.env,
+                self.policy,
+                self.key,
+                num_episodes=1,
+                n=3,
+                max_steps=1,
+            )
+
+
+
+class RepeatingNStepTestEnv:
+    """
+    S0 --(+2)--> S1 --(+4)--> S0
+       --(+6)--> S2 --(+8)--> S3 (terminal)
+    """
+
+    num_states = 4
+    num_actions = 1
+
+    def reset(self, key):
+        return (0, 0), jnp.int32(0)
+
+    def step(self, key, env_state, action):
+        t, state = env_state
+
+        next_states = [1, 0, 2, 3]
+        rewards = [2.0, 4.0, 6.0, 8.0]
+
+        next_state = next_states[t]
+        terminated = t == 3
+
+        return (
+            (t + 1, next_state),
+            jnp.int32(next_state),
+            rewards[t],
+            terminated,
+            {},
         )
 
-        # 1 + 0.5*2 + 0.25*3 + 0.125*4
-        assert jnp.isclose(result, 3.25)
 
-    def test_single_remaining_reward(self):
-        result = n_step_return(
-            self.rewards, self.values,
-            t=3, n=3, gamma=0.5,
-        )
+def test_n_step_td_bootstraps_from_current_values():
+    env = RepeatingNStepTestEnv()
+    policy = jnp.ones((4, 1))
 
-        assert jnp.isclose(result, 4.0)
+    V = n_step_td_prediction(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        n=2,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    # Episode 1:
+    # V(S0) = 3, then 3 + 0.5*(6+8-3) = 8.5
+    # V(S1) = 0.5*(4+6) = 5
+    # V(S2) = 0.5*8 = 4
+    #
+    # Episode 2:
+    # First update to S0 bootstraps from its existing V(S0)=8.5:
+    # G = 2+4+8.5 = 14.5
+    # V(S0) = 8.5 + 0.5*(14.5-8.5) = 11.5
+    #
+    # Subsequent updates:
+    # V(S1) = 5 + 0.5*(4+6+4-5) = 9.5
+    # V(S0) = 11.5 + 0.5*(6+8-11.5) = 12.75
+    # V(S2) = 4 + 0.5*(8-4) = 6
+
+    expected = jnp.array([12.75, 9.5, 6.0, 0.0])
+
+    assert jnp.allclose(V, expected)
+

@@ -237,30 +237,33 @@ def td0_prediction_jit(
 
 def n_step_return(
     rewards,
-    boostrap_value,
-    t,
+    states,
+    values,
+    tau,
+    T,
     n,
     gamma=1.0,
 ):
     """
-    Calculate the n-step return for a finite episode.
+    Calculate the n-step return using circular state/reward buffers.
 
     Args:
-        rewards: (T,) rewards R_1, ..., R_T.
-        values: (T+1,) estimates V(S_0), ..., V(S_T).
-                The final state is terminal.
-        t: Starting time step.
+        rewards: (n,) circular buffer of recent rewards.
+        states: (n+1,) circular buffer of recent states.
+        values: (S,) current state-value estimates.
+        tau: Time index of the state being updated.
+        T: Terminal time of the episode.
         n: Number of steps to look ahead.
         gamma: Discount factor.
-
-    Returns:
-        Scalar n-step return.
     """
-    value = 0
-    for i in range(t, min(t + n, len(rewards))):
-        value += rewards[i] * gamma ** (i - t)
 
-    value += (gamma ** n) * boostrap_value
+    value = 0
+    for i in range(tau, min(tau + n, T)):
+        value += rewards[i % n] * gamma ** (i - tau)
+
+    if tau + n < T:
+        bootstrap_state = states[(tau + n) % (n + 1)]
+        value += (gamma ** n) * values[bootstrap_state]
 
     return value
 
@@ -279,23 +282,23 @@ def n_step_td_prediction(
     Returns:
         V: (S,) estimated state values.
     """
+    V = jnp.zeros((env.num_states,), dtype=jnp.float32)
     for episode in range(num_episodes):
         state_buffer = [None] * (n + 1)
         reward_buffer = [0.0] * n
 
         terminated = False
         t = 0
-        tau = 0
-        T = 0
+        T = float('inf')
 
         key, env_key = jax.random.split(key)
         env_state, observation = env.reset(env_key)
-        state_buffer[t % n] = observation
-        num_actions = policy.num_actions
+        state_buffer[t % (n + 1)] = observation
+        num_actions = env.num_actions
 
         while True:
             if not terminated:
-                key, action_key, step_key = jax.random.split(key)
+                key, action_key, step_key = jax.random.split(key, 3)
                 # take one environment step
                 # store reward in reward_buffer
                 # store next_state in state_buffer
@@ -306,14 +309,32 @@ def n_step_td_prediction(
                     p=policy[observation],
                 )
 
-                next_env_state, next_state, reward, terminated, _ = (
+                next_env_state, next_observation, reward, terminated, _ = (
                     env.step(step_key, env_state, action)
                 )
                 reward_buffer[t % n] = reward
-                state_buffer[(t+1) % n] = next_state
+                state_buffer[(t+1) % (n+1)] = next_observation
 
-            if terminated:
-                T = t
+                env_state = next_env_state
+                observation = next_observation
 
-            tau = T - n + 1
+                if terminated:
+                    T = t + 1
 
+                if not bool(terminated) and t + 1 >= max_steps:
+                    raise RuntimeError(
+                        f"Episode did not terminate within {max_steps} steps."
+                    )
+
+            tau = t - n + 1
+            if tau >= 0:
+                value = n_step_return(reward_buffer, state_buffer, V, tau, T, n, gamma) 
+                s_tau = state_buffer[tau % (n + 1)]
+                delta = alpha * (value - V[s_tau])
+                V = V.at[s_tau].add(delta)
+
+            if tau == T - 1:
+                break
+
+            t += 1
+    return V
