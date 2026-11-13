@@ -1669,3 +1669,227 @@ def test_n_step_td_bootstraps_from_current_values():
 
     assert jnp.allclose(V, expected)
 
+from jax_rl.td.td_prediction import n_step_td_prediction, n_step_td_prediction_jit
+
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5, 10])
+@pytest.mark.parametrize("gamma", [0.5, 1.0])
+@pytest.mark.parametrize("num_episodes", [1, 20])
+def test_n_step_td_jit_matches_reference(
+    n, gamma, num_episodes
+):
+    env = Gridworld(size=4)
+    policy = jnp.full(
+        (env.num_states, env.num_actions),
+        1.0 / env.num_actions,
+    )
+    key = jax.random.key(42)
+
+    kwargs = dict(
+        num_episodes=num_episodes,
+        n=n,
+        alpha=0.1,
+        gamma=gamma,
+        max_steps=1000,
+    )
+
+    V_reference = n_step_td_prediction(
+        env, policy, key, **kwargs
+    )
+
+    V_compiled = n_step_td_prediction_jit(
+        env, policy, key, **kwargs
+    )
+
+    assert jnp.allclose(
+        V_reference,
+        V_compiled,
+        atol=1e-5,
+        rtol=1e-5,
+    ), (
+        f"n={n}, gamma={gamma}, "
+        f"num_episodes={num_episodes}\n"
+        f"reference={V_reference}\n"
+        f"compiled={V_compiled}"
+    )
+
+
+
+def test_n_step_td_jit_zero_episodes():
+    env = Gridworld(size=4)
+    policy = jnp.full(
+        (env.num_states, env.num_actions),
+        1.0 / env.num_actions,
+    )
+
+    V = n_step_td_prediction_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+        n=3,
+    )
+
+    assert jnp.array_equal(
+        V,
+        jnp.zeros((env.num_states,)),
+    )
+
+
+
+class JitNStepTestEnv:
+    """
+    S0 --(+2)--> S1 --(+4)--> S2 (terminal)
+    """
+
+    num_states = 3
+    num_actions = 1
+
+    def reset(self, key):
+        state = jnp.int32(0)
+        return state, state
+
+    def step(self, key, env_state, action):
+        next_state = jnp.minimum(
+            env_state + 1,
+            self.num_states - 1,
+        )
+
+        reward = jnp.where(
+            env_state == 0,
+            2.0,
+            4.0,
+        )
+
+        terminated = next_state == 2
+
+        return (
+            next_state,
+            next_state,
+            reward,
+            terminated,
+            {},
+        )
+
+
+
+@pytest.mark.parametrize(
+    "n, gamma, expected",
+    [
+        (1, 1.0, [1.0, 2.0, 0.0]),
+        (2, 1.0, [3.0, 2.0, 0.0]),
+        (5, 1.0, [3.0, 2.0, 0.0]),
+        (2, 0.5, [2.0, 2.0, 0.0]),
+    ],
+)
+def test_n_step_td_jit_terminal_flushing(
+    n, gamma, expected
+):
+    env = JitNStepTestEnv()
+    policy = jnp.ones((env.num_states, env.num_actions))
+
+    V = n_step_td_prediction_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        n=n,
+        alpha=0.5,
+        gamma=gamma,
+        max_steps=10,
+    )
+
+    assert jnp.allclose(
+        V,
+        jnp.array(expected),
+        atol=1e-6,
+    )
+
+
+
+def test_n_step_td_jit_exact_max_steps():
+    env = JitNStepTestEnv()
+    policy = jnp.ones((env.num_states, env.num_actions))
+
+    V = n_step_td_prediction_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        n=3,
+        alpha=0.5,
+        max_steps=2,
+    )
+
+    assert jnp.allclose(
+        V,
+        jnp.array([3.0, 2.0, 0.0]),
+    )
+
+
+def test_n_step_td_jit_max_steps_exceeded():
+    env = JitNStepTestEnv()
+    policy = jnp.ones((env.num_states, env.num_actions))
+
+    with pytest.raises(
+        RuntimeError,
+        match="did not terminate",
+    ):
+        n_step_td_prediction_jit(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            n=3,
+            max_steps=1,
+        )
+
+
+
+class JitRepeatingNStepTestEnv:
+    """
+    S0 --(+2)--> S1 --(+4)--> S0
+       --(+6)--> S2 --(+8)--> S3 (terminal)
+    """
+
+    num_states = 4
+    num_actions = 1
+
+    def reset(self, key):
+        return jnp.int32(0), jnp.int32(0)
+
+    def step(self, key, env_state, action):
+        next_states = jnp.array([1, 0, 2, 3])
+        rewards = jnp.array([2.0, 4.0, 6.0, 8.0])
+
+        next_state = next_states[env_state]
+        reward = rewards[env_state]
+        terminated = env_state == 3
+
+        return (
+            env_state + 1,
+            next_state,
+            reward,
+            terminated,
+            {},
+        )
+
+
+def test_n_step_td_jit_repeated_state_bootstrapping():
+    env = JitRepeatingNStepTestEnv()
+    policy = jnp.ones((env.num_states, env.num_actions))
+
+    V = n_step_td_prediction_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        n=2,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    expected = jnp.array([12.75, 9.5, 6.0, 0.0])
+
+    assert jnp.allclose(V, expected, atol=1e-6)

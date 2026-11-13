@@ -338,3 +338,274 @@ def n_step_td_prediction(
 
             t += 1
     return V
+
+
+
+@partial(
+    jax.jit,
+    static_argnames=("env", "num_episodes", "n", "max_steps"),
+)
+def _n_step_td_prediction_jit(
+    env,
+    policy,
+    key,
+    num_episodes,
+    n,
+    alpha,
+    gamma,
+    max_steps,
+):
+    V = jnp.zeros((env.num_states,), dtype=jnp.float32)
+
+    def run_episode(carry, _):
+        V, key, earlier_failure = carry
+
+        def skip_episode(_):
+            return V, key, earlier_failure
+
+        def train_episode(_):
+            key_next, reset_key = jax.random.split(key)
+            env_state, observation = env.reset(reset_key)
+
+            states = jnp.zeros(
+                (n + 1,), dtype=jnp.int32
+            ).at[0].set(observation)
+
+            rewards = jnp.zeros((n,), dtype=jnp.float32)
+
+            initial = (
+                V,
+                key_next,
+                env_state,
+                observation,
+                states,
+                rewards,
+                jnp.int32(0),               # t
+                jnp.int32(max_steps + 1),   # T (sentinel)
+                jnp.bool_(False),           # terminated
+                jnp.bool_(False),           # failure
+                jnp.bool_(False),           # done
+            )
+
+            def active(carry):
+                return ~carry[-1]
+
+            def tick(carry):
+                (
+                    V, key, env_state, observation,
+                    states, rewards, t, T,
+                    terminated, failure, done,
+                ) = carry
+
+                def collect_step(_):
+                    next_key, action_key, step_key = (
+                        jax.random.split(key, 3)
+                    )
+
+                    action = jax.random.choice(
+                        action_key,
+                        a=env.num_actions,
+                        p=policy[observation],
+                    )
+
+                    (
+                        next_env_state,
+                        next_observation,
+                        reward,
+                        is_terminal,
+                        _,
+                    ) = env.step(step_key, env_state, action)
+
+                    next_rewards = rewards.at[t % n].set(
+                        reward
+                    )
+
+                    next_states = states.at[
+                        (t + 1) % (n + 1)
+                    ].set(next_observation)
+
+                    next_T = jnp.where(
+                        is_terminal, t + 1, T
+                    )
+
+                    return (
+                        next_key,
+                        next_env_state,
+                        next_observation,
+                        next_states,
+                        next_rewards,
+                        next_T,
+                        is_terminal,
+                    )
+
+                def skip_step(_):
+                    return (
+                        key,
+                        env_state,
+                        observation,
+                        states,
+                        rewards,
+                        T,
+                        terminated,
+                    )
+
+                (
+                    key,
+                    env_state,
+                    observation,
+                    states,
+                    rewards,
+                    T,
+                    terminated,
+                ) = jax.lax.cond(
+                    terminated,
+                    skip_step,
+                    collect_step,
+                    operand=None,
+                )
+
+                tau = t - n + 1
+
+                def update_value(V):
+                    end = jnp.minimum(tau + n, T)
+
+                    def sum_reward(i, total):
+                        return (
+                            total
+                            + gamma ** (i - tau)
+                            * rewards[i % n]
+                        )
+
+                    G = jax.lax.fori_loop(
+                        tau,
+                        end,
+                        sum_reward,
+                        jnp.float32(0.0),
+                    )
+
+                    G = jax.lax.cond(
+                        tau + n < T,
+                        lambda g: (
+                            g
+                            + gamma ** n
+                            * V[
+                                states[
+                                    (tau + n) % (n + 1)
+                                ]
+                            ]
+                        ),
+                        lambda g: g,
+                        G,
+                    )
+
+                    s_tau = states[tau % (n + 1)]
+
+                    return V.at[s_tau].add(
+                        alpha * (G - V[s_tau])
+                    )
+
+                failure = (
+                    ~terminated
+                ) & (t + 1 >= max_steps)
+
+                V = jax.lax.cond(
+                    (tau >= 0) & (~failure),
+                    update_value,
+                    lambda V: V,
+                    V,
+                )
+
+                done = failure | (tau == T - 1)
+
+                return (
+                    V,
+                    key,
+                    env_state,
+                    observation,
+                    states,
+                    rewards,
+                    t + 1,
+                    T,
+                    terminated,
+                    failure,
+                    done,
+                )
+
+            final = jax.lax.while_loop(
+                active,
+                tick,
+                initial,
+            )
+
+            return final[0], final[1], final[9]
+
+        new_carry = jax.lax.cond(
+            earlier_failure,
+            skip_episode,
+            train_episode,
+            operand=None,
+        )
+
+        return new_carry, None
+
+    (V, key, failed), _ = jax.lax.scan(
+        run_episode,
+        (V, key, jnp.bool_(False)),
+        None,
+        length=num_episodes,
+    )
+
+    return V, failed
+
+
+def n_step_td_prediction_jit(
+    env,
+    policy,
+    key,
+    num_episodes=10_000,
+    n=1,
+    alpha=0.1,
+    gamma=1.0,
+    max_steps=1000,
+):
+    """
+    JIT-compiled online n-step TD prediction.
+
+    Args:
+        env: JAX-compatible environment.
+        policy: (S, A) array of action probabilities.
+        key: JAX PRNG key.
+        num_episodes: Number of training episodes.
+        n: Number of steps before bootstrapping.
+        alpha: Learning rate.
+        gamma: Discount factor.
+        max_steps: Maximum transitions per episode.
+
+    Returns:
+        V: (S,) estimated state values.
+    """
+    if n < 1:
+        raise ValueError("n must be positive")
+
+    if max_steps < 1:
+        raise ValueError("max_steps must be positive")
+
+    V, failed = _n_step_td_prediction_jit(
+        env,
+        policy,
+        key,
+        num_episodes,
+        n,
+        alpha,
+        gamma,
+        max_steps,
+    )
+
+    if bool(failed):
+        raise RuntimeError(
+            f"Episode did not terminate within {max_steps} steps."
+        )
+
+    return V
+
+
