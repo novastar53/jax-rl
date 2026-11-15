@@ -236,4 +236,31 @@ def sarsa_jit(
     return Q
 
 
+def n_step_sarsa_return(
+    rewards,
+    states,
+    actions,
+    Q,
+    tau,
+    T,
+    n,
+    gamma=1.0,
+):
+    """
+    Calculate the n-step SARSA return using circular buffers.
+
+    Args:
+        rewards: (n,) circular buffer of recent rewards.
+        states: (n+1,) circular buffer of recent states.
+        actions: (n+1,) circular buffer of recent actions.
+        Q: (S, A) current action-value estimates.
+        tau: Time index of the state-action pair being updated.
+        T: Episode termination time.
+        n: Number of steps to look ahead.
+        gamma: Discount factor.
+
+    Returns:
+        Scalar n-step SARSA return.
+    """
+    ...
 
