@@ -2297,3 +2297,218 @@ class TestNStepSarsa:
         ])
 
         assert jnp.allclose(Q, expected)
+
+
+from jax_rl.td.sarsa import n_step_sarsa, n_step_sarsa_jit
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+@pytest.mark.parametrize("gamma", [0.5, 1.0])
+@pytest.mark.parametrize("num_episodes", [1, 20])
+def test_n_step_sarsa_jit_matches_reference(
+    n, gamma, num_episodes
+):
+    env = Gridworld(size=4)
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+    key = jax.random.key(42)
+
+    kwargs = dict(
+        num_episodes=num_episodes,
+        n=n,
+        alpha=0.1,
+        gamma=gamma,
+        max_steps=1000,
+    )
+
+    Q_reference = n_step_sarsa(
+        env, policy, key, **kwargs
+    )
+
+    Q_compiled = n_step_sarsa_jit(
+        env, policy, key, **kwargs
+    )
+
+    assert jnp.allclose(
+        Q_reference,
+        Q_compiled,
+        atol=1e-5,
+        rtol=1e-5,
+    ), (
+        f"n={n}, gamma={gamma}, "
+        f"num_episodes={num_episodes}\n"
+        f"Reference:\n{Q_reference}\n"
+        f"JIT:\n{Q_compiled}"
+    )
+
+
+
+class JitNStepSarsaActionTestEnv:
+    """
+    Two transitions with two available actions.
+
+    S0 --(+2)--> S1 --(+4)--> S2 (terminal).
+    Rewards and transitions do not depend on the action.
+    """
+
+    num_states = 3
+    num_actions = 2
+
+    def reset(self, key):
+        state = jnp.int32(0)
+        return state, state
+
+    def step(self, key, env_state, action):
+        next_state = jnp.minimum(env_state + 1, 2)
+
+        reward = jnp.where(
+            env_state == 0,
+            2.0,
+            4.0,
+        )
+
+        terminated = next_state == 2
+
+        return (
+            next_state,
+            next_state,
+            reward,
+            terminated,
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    "n, gamma, expected",
+    [
+        (1, 1.0, [1.0, 2.0, 0.0]),
+        (2, 1.0, [3.0, 2.0, 0.0]),
+        (5, 1.0, [3.0, 2.0, 0.0]),
+        (2, 0.5, [2.0, 2.0, 0.0]),
+    ],
+)
+def test_n_step_sarsa_jit_terminal_flushing(
+    n, gamma, expected
+):
+    env = JitNStepTestEnv()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q = n_step_sarsa_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        n=n,
+        alpha=0.5,
+        gamma=gamma,
+        max_steps=10,
+    )
+
+    assert Q.shape == (3, 1)
+    assert jnp.allclose(
+        Q[:, 0],
+        jnp.array(expected),
+        atol=1e-6,
+    )
+
+
+
+@pytest.mark.parametrize("action", [0, 1])
+def test_n_step_sarsa_jit_action_values(action):
+    env = JitNStepSarsaActionTestEnv()
+    policy = FixedActionPolicy(action=action)
+
+    Q = n_step_sarsa_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        n=2,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    expected = jnp.zeros((3, 2))
+    expected = expected.at[0, action].set(3.0)
+    expected = expected.at[1, action].set(2.0)
+
+    assert jnp.allclose(Q, expected)
+
+
+
+def test_n_step_sarsa_jit_repeated_state_bootstrapping():
+    env = JitRepeatingNStepTestEnv()
+    policy = EpsilonGreedyPolicy(epsilon=0.0)
+
+    Q = n_step_sarsa_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        n=2,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    expected = jnp.array([
+        [12.75],
+        [9.5],
+        [6.0],
+        [0.0],
+    ])
+
+    assert jnp.allclose(Q, expected, atol=1e-6)
+
+
+
+def test_n_step_sarsa_jit_zero_episodes():
+    env = Gridworld(size=4)
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q = n_step_sarsa_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+        n=3,
+    )
+
+    assert jnp.array_equal(
+        Q,
+        jnp.zeros((env.num_states, env.num_actions)),
+    )
+
+
+def test_n_step_sarsa_jit_exact_max_steps():
+    env = JitNStepTestEnv()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q = n_step_sarsa_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        n=3,
+        alpha=0.5,
+        max_steps=2,
+    )
+
+    assert jnp.allclose(
+        Q[:, 0],
+        jnp.array([3.0, 2.0, 0.0]),
+    )
+
+
+def test_n_step_sarsa_jit_max_steps_exceeded():
+    env = JitNStepTestEnv()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        n_step_sarsa_jit(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            n=3,
+            max_steps=1,
+        )
+
+

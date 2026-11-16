@@ -345,3 +345,306 @@ def n_step_sarsa(
             t += 1
     return Q
 
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "env",
+        "policy",
+        "num_episodes",
+        "n",
+        "max_steps",
+    ),
+)
+def _n_step_sarsa_jit(
+    env,
+    policy,
+    key,
+    num_episodes,
+    n,
+    alpha,
+    gamma,
+    max_steps,
+):
+    Q = jnp.zeros(
+        (env.num_states, env.num_actions),
+        dtype=jnp.float32,
+    )
+
+    def train_episode(carry, _):
+        Q, key, failed = carry
+
+        def skip_episode(_):
+            return Q, key, failed
+
+        def run_episode(_):
+            episode_key, env_key, action_key = jax.random.split(key, 3)
+
+            env_state, observation = env.reset(env_key)
+            action = policy.select_action(action_key, Q[observation])
+
+            states = jnp.zeros(
+                n + 1, dtype=jnp.int32
+            ).at[0].set(observation)
+
+            actions = jnp.zeros(
+                n + 1, dtype=jnp.int32
+            ).at[0].set(action)
+
+            rewards = jnp.zeros(n, dtype=jnp.float32)
+
+            initial = (
+                Q,
+                episode_key,
+                env_state,
+                observation,
+                action,
+                states,
+                actions,
+                rewards,
+                jnp.int32(0),              # t
+                jnp.int32(max_steps + 1),  # T
+                jnp.bool_(False),          # terminated
+                jnp.bool_(False),          # failed
+                jnp.bool_(False),          # done
+            )
+
+            def condition(carry):
+                return ~carry[-1]
+
+            def step(carry):
+                (
+                    Q, key, env_state, observation, action,
+                    states, actions, rewards, t, T,
+                    terminated, failed, done,
+                ) = carry
+
+                def take_step(_):
+                    next_key, env_key, action_key = jax.random.split(
+                        key, 3
+                    )
+
+                    (
+                        next_env_state,
+                        next_observation,
+                        reward,
+                        is_terminal,
+                        _,
+                    ) = env.step(env_key, env_state, action)
+
+                    next_states = states.at[
+                        (t + 1) % (n + 1)
+                    ].set(next_observation)
+
+                    next_rewards = rewards.at[
+                        t % n
+                    ].set(reward)
+
+                    next_T = jnp.where(
+                        is_terminal, t + 1, T
+                    )
+
+                    def select_next_action(_):
+                        return policy.select_action(
+                            action_key, Q[next_observation]
+                        )
+
+                    next_action = jax.lax.cond(
+                        is_terminal,
+                        lambda _: action,
+                        select_next_action,
+                        operand=None,
+                    )
+
+                    next_actions = actions.at[
+                        (t + 1) % (n + 1)
+                    ].set(next_action)
+
+                    step_failed = (
+                        ~is_terminal
+                    ) & (t + 1 >= max_steps)
+
+                    return (
+                        next_key,
+                        next_env_state,
+                        next_observation,
+                        next_action,
+                        next_states,
+                        next_actions,
+                        next_rewards,
+                        next_T,
+                        is_terminal,
+                        step_failed,
+                    )
+
+                def flush_pending(_):
+                    return (
+                        key,
+                        env_state,
+                        observation,
+                        action,
+                        states,
+                        actions,
+                        rewards,
+                        T,
+                        terminated,
+                        jnp.bool_(False),
+                    )
+
+                (
+                    key,
+                    env_state,
+                    observation,
+                    action,
+                    states,
+                    actions,
+                    rewards,
+                    T,
+                    terminated,
+                    step_failed,
+                ) = jax.lax.cond(
+                    terminated,
+                    flush_pending,
+                    take_step,
+                    operand=None,
+                )
+
+                tau = t - n + 1
+
+                def update_q(Q):
+                    end = jnp.minimum(tau + n, T)
+
+                    def accumulate_reward(i, total):
+                        return (
+                            total
+                            + gamma ** (i - tau)
+                            * rewards[i % n]
+                        )
+
+                    G = jax.lax.fori_loop(
+                        tau,
+                        end,
+                        accumulate_reward,
+                        jnp.float32(0.0),
+                    )
+
+                    def add_bootstrap(G):
+                        index = (tau + n) % (n + 1)
+
+                        bootstrap_state = states[index]
+                        bootstrap_action = actions[index]
+
+                        return (
+                            G
+                            + gamma ** n
+                            * Q[bootstrap_state, bootstrap_action]
+                        )
+
+                    G = jax.lax.cond(
+                        tau + n < T,
+                        add_bootstrap,
+                        lambda G: G,
+                        G,
+                    )
+
+                    index = tau % (n + 1)
+
+                    s_tau = states[index]
+                    a_tau = actions[index]
+
+                    return Q.at[s_tau, a_tau].add(
+                        alpha * (G - Q[s_tau, a_tau])
+                    )
+
+                Q = jax.lax.cond(
+                    (tau >= 0) & (~step_failed),
+                    update_q,
+                    lambda Q: Q,
+                    Q,
+                )
+
+                done = step_failed | (tau == T - 1)
+
+                return (
+                    Q,
+                    key,
+                    env_state,
+                    observation,
+                    action,
+                    states,
+                    actions,
+                    rewards,
+                    t + 1,
+                    T,
+                    terminated,
+                    step_failed,
+                    done,
+                )
+
+            final = jax.lax.while_loop(
+                condition,
+                step,
+                initial,
+            )
+
+            return final[0], final[1], final[11]
+
+        next_carry = jax.lax.cond(
+            failed,
+            skip_episode,
+            run_episode,
+            operand=None,
+        )
+
+        return next_carry, None
+
+    (Q, _, failed), _ = jax.lax.scan(
+        train_episode,
+        (Q, key, jnp.bool_(False)),
+        None,
+        length=num_episodes,
+    )
+
+    return Q, failed
+
+
+def n_step_sarsa_jit(
+    env,
+    policy,
+    key,
+    num_episodes=10_000,
+    n=1,
+    alpha=0.1,
+    gamma=1.0,
+    max_steps=1000,
+):
+    """
+    JIT-compiled online n-step SARSA control.
+
+    Returns:
+        Q: (S, A) estimated action values.
+    """
+    if n < 1:
+        raise ValueError("n must be positive")
+
+    if max_steps < 1:
+        raise ValueError("max_steps must be positive")
+
+    Q, failed = _n_step_sarsa_jit(
+        env,
+        policy,
+        key,
+        num_episodes,
+        n,
+        alpha,
+        gamma,
+        max_steps,
+    )
+
+    if bool(failed):
+        raise RuntimeError(
+            f"Episode did not terminate within {max_steps} steps"
+        )
+
+    return Q
