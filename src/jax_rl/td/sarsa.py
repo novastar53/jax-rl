@@ -262,5 +262,16 @@ def n_step_sarsa_return(
     Returns:
         Scalar n-step SARSA return.
     """
-    ...
+    value = 0.0
 
+    for i in range(tau, min(tau + n, T)):
+        value += rewards[i % n] * gamma ** (i - tau)
+
+    if tau + n < T: 
+        idx = (tau + n) % (n + 1)
+        q_state = states[idx]
+        q_action = actions[idx]
+        q = Q[q_state, q_action]
+        value += q * (gamma ** n)
+
+    return value

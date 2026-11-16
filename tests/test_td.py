@@ -1893,3 +1893,191 @@ def test_n_step_td_jit_repeated_state_bootstrapping():
     expected = jnp.array([12.75, 9.5, 6.0, 0.0])
 
     assert jnp.allclose(V, expected, atol=1e-6)
+
+
+from jax_rl.td.sarsa import n_step_sarsa_return
+
+
+class TestNStepSarsaReturn:
+    def setup_method(self):
+        self.rewards = [1.0, 2.0, 3.0]
+        self.states = [0, 1, 2, 3]
+        self.actions = [0, 1, 0, 1]
+
+        self.Q = jnp.array([
+            [10.0, 11.0],
+            [20.0, 21.0],
+            [30.0, 31.0],
+            [40.0, 41.0],
+        ])
+
+    def test_one_step_return(self):
+        result = n_step_sarsa_return(
+            self.rewards,
+            self.states,
+            self.actions,
+            self.Q,
+            tau=0,
+            T=5,
+            n=1,
+            gamma=0.5,
+        )
+
+        # R1 + gamma * Q(S1, A1)
+        # 1 + 0.5 * 21 = 11.5
+        assert jnp.isclose(result, 11.5)
+
+    def test_two_step_return(self):
+        result = n_step_sarsa_return(
+            self.rewards,
+            self.states,
+            self.actions,
+            self.Q,
+            tau=0,
+            T=5,
+            n=2,
+            gamma=0.5,
+        )
+
+        # R1 + gamma*R2 + gamma^2*Q(S2,A2)
+        # 1 + 0.5*2 + 0.25*30 = 9.5
+        assert jnp.isclose(result, 9.5)
+
+
+
+def test_bootstrap_at_last_nonterminal_state(self):
+    # n=2, so rewards has 2 slots and states/actions have 3.
+    # R2 occupies slot 1; R3 occupies slot 0.
+    rewards = [3.0, 2.0]
+    states = [3, 1, 2]
+    actions = [1, 1, 0]
+
+    result = n_step_sarsa_return(
+        rewards,
+        states,
+        actions,
+        self.Q,
+        tau=1,
+        T=4,
+        n=2,
+        gamma=0.5,
+    )
+
+    # tau+n = 3 = T-1, so bootstrapping is required.
+    # 2 + 0.5*3 + 0.25*Q(3, 1)
+    # = 2 + 1.5 + 10.25 = 13.75
+    assert jnp.isclose(result, 13.75)
+
+
+
+def test_no_bootstrap_at_terminal_state(self):
+    rewards = [3.0, 2.0]
+    states = [3, 1, 2]
+    actions = [1, 1, 0]
+
+    result = n_step_sarsa_return(
+        rewards,
+        states,
+        actions,
+        self.Q,
+        tau=1,
+        T=3,
+        n=2,
+        gamma=0.5,
+    )
+
+    # tau+n = T, so no bootstrap.
+    # 2 + 0.5*3 = 3.5
+    assert jnp.isclose(result, 3.5)
+
+
+
+    def test_n_exceeds_remaining_episode(self):
+        rewards = [1.0, 2.0, 3.0, 4.0, 5.0]
+        states = [0, 1, 2, 3, 0, 1]
+        actions = [0, 1, 0, 1, 0, 1]
+
+        result = n_step_sarsa_return(
+            rewards,
+            states,
+            actions,
+            self.Q,
+            tau=3,
+            T=5,
+            n=5,
+            gamma=0.5,
+        )
+
+        # R4 + gamma*R5, with no bootstrap.
+        assert jnp.isclose(result, 6.5)
+
+    def test_gamma_one(self):
+        result = n_step_sarsa_return(
+            self.rewards,
+            self.states,
+            self.actions,
+            self.Q,
+            tau=0,
+            T=5,
+            n=3,
+            gamma=1.0,
+        )
+
+        # R1 + R2 + R3 + Q(S3,A3)
+        assert jnp.isclose(result, 47.0)
+
+    def test_gamma_zero(self):
+        result = n_step_sarsa_return(
+            self.rewards,
+            self.states,
+            self.actions,
+            self.Q,
+            tau=0,
+            T=5,
+            n=3,
+            gamma=0.0,
+        )
+
+        assert jnp.isclose(result, 1.0)
+
+    def test_circular_buffer_wraparound(self):
+        n = 2
+
+        # At tau=3, rewards R4 and R5 occupy slots 1 and 0.
+        rewards = [5.0, 4.0]
+
+        # State/action buffer length = n+1 = 3.
+        # S5, A5 occupy slot 5 % 3 = 2.
+        states = [3, 4, 2]
+        actions = [0, 1, 1]
+
+        result = n_step_sarsa_return(
+            rewards,
+            states,
+            actions,
+            self.Q,
+            tau=3,
+            T=7,
+            n=n,
+            gamma=0.5,
+        )
+
+        # R4 + gamma*R5 + gamma^2*Q(S5,A5)
+        # 4 + 0.5*5 + 0.25*31 = 14.25
+        assert jnp.isclose(result, 14.25)
+
+    def test_full_episode_equals_monte_carlo_return(self):
+        result = n_step_sarsa_return(
+            self.rewards,
+            self.states,
+            self.actions,
+            self.Q,
+            tau=0,
+            T=3,
+            n=3,
+            gamma=0.5,
+        )
+
+        # 1 + 0.5*2 + 0.25*3 = 2.75
+        assert jnp.isclose(result, 2.75)
+
