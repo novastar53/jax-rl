@@ -2081,3 +2081,219 @@ def test_no_bootstrap_at_terminal_state(self):
         # 1 + 0.5*2 + 0.25*3 = 2.75
         assert jnp.isclose(result, 2.75)
 
+from jax_rl.td.sarsa import n_step_sarsa
+
+
+class NStepSarsaActionTestEnv:
+    """
+    Two transitions:
+
+    S0 --(+2)--> S1 --(+4)--> S2 (terminal)
+
+    Records the actions actually executed.
+    """
+
+    num_states = 3
+    num_actions = 2
+
+    def __init__(self):
+        self.actions_taken = []
+
+    def reset(self, key):
+        self.actions_taken.clear()
+        return jnp.int32(0), jnp.int32(0)
+
+    def step(self, key, env_state, action):
+        state = int(env_state)
+        self.actions_taken.append(int(action))
+
+        if state == 0:
+            return jnp.int32(1), jnp.int32(1), 2.0, False, {}
+
+        if state == 1:
+            return jnp.int32(2), jnp.int32(2), 4.0, True, {}
+
+        raise RuntimeError("Stepped after termination")
+
+
+class RepeatingNStepSarsaTestEnv:
+    """
+    Four transitions, including a repeated visit to S0:
+
+    S0 --(+2)--> S1 --(+4)--> S0
+       --(+6)--> S2 --(+8)--> S3 (terminal)
+    """
+
+    num_states = 4
+    num_actions = 2
+
+    def reset(self, key):
+        return (0, 0), jnp.int32(0)
+
+    def step(self, key, env_state, action):
+        t, state = env_state
+
+        next_states = [1, 0, 2, 3]
+        rewards = [2.0, 4.0, 6.0, 8.0]
+
+        next_state = next_states[t]
+
+        return (
+            (t + 1, next_state),
+            jnp.int32(next_state),
+            rewards[t],
+            t == 3,
+            {},
+        )
+
+
+
+class TestNStepSarsa:
+    def setup_method(self):
+        self.env = NStepTestEnv()
+        self.policy = FixedActionPolicy(action=0)
+        self.key = jax.random.key(42)
+
+    @pytest.mark.parametrize(
+        "n, expected",
+        [
+            (1, [1.0, 2.0, 0.0]),
+            (2, [3.0, 2.0, 0.0]),
+            (5, [3.0, 2.0, 0.0]),
+        ],
+    )
+    def test_single_episode(self, n, expected):
+        Q = n_step_sarsa(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            n=n,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        assert Q.shape == (3, 1)
+        assert jnp.allclose(Q[:, 0], jnp.array(expected))
+
+    def test_discounting(self):
+        Q = n_step_sarsa(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            n=2,
+            alpha=0.5,
+            gamma=0.5,
+        )
+
+        # S0: 0.5 * (2 + 0.5 * 4) = 2
+        # S1: 0.5 * 4 = 2
+        assert jnp.allclose(
+            Q[:, 0],
+            jnp.array([2.0, 2.0, 0.0]),
+        )
+
+    def test_multiple_episodes(self):
+        Q = n_step_sarsa(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=2,
+            n=2,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        # Episode 1: Q(S0,0)=3, Q(S1,0)=2
+        # Episode 2: Q(S0,0)=4.5, Q(S1,0)=3
+        assert jnp.allclose(
+            Q[:, 0],
+            jnp.array([4.5, 3.0, 0.0]),
+        )
+
+    def test_zero_episodes(self):
+        Q = n_step_sarsa(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=0,
+            n=2,
+        )
+
+        assert jnp.array_equal(Q, jnp.zeros((3, 1)))
+
+    def test_exact_max_steps(self):
+        Q = n_step_sarsa(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            n=3,
+            alpha=0.5,
+            max_steps=2,
+        )
+
+        assert jnp.allclose(
+            Q[:, 0],
+            jnp.array([3.0, 2.0, 0.0]),
+        )
+
+    def test_max_steps_exceeded(self):
+        with pytest.raises(RuntimeError, match="did not terminate"):
+            n_step_sarsa(
+                self.env,
+                self.policy,
+                self.key,
+                num_episodes=1,
+                n=3,
+                max_steps=1,
+            )
+
+    def test_action_selection(self):
+        env = NStepSarsaActionTestEnv()
+        policy = AlternatingActionPolicy()
+
+        Q = n_step_sarsa(
+            env,
+            policy,
+            self.key,
+            num_episodes=1,
+            n=2,
+            alpha=0.5,
+        )
+
+        assert env.actions_taken == [0, 1]
+        assert policy.calls == 2
+
+        expected = jnp.array([
+            [3.0, 0.0],
+            [0.0, 2.0],
+            [0.0, 0.0],
+        ])
+
+        assert jnp.allclose(Q, expected)
+
+    def test_repeated_state_bootstrapping(self):
+        env = RepeatingNStepSarsaTestEnv()
+
+        Q = n_step_sarsa(
+            env,
+            self.policy,
+            self.key,
+            num_episodes=2,
+            n=2,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        # For a deterministic action-0 policy, this should
+        # match the n-step TD repeating-state calculation.
+        expected = jnp.array([
+            [12.75, 0.0],
+            [9.5, 0.0],
+            [6.0, 0.0],
+            [0.0, 0.0],
+        ])
+
+        assert jnp.allclose(Q, expected)

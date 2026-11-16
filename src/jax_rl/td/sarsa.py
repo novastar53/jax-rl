@@ -275,3 +275,73 @@ def n_step_sarsa_return(
         value += q * (gamma ** n)
 
     return value
+
+
+def n_step_sarsa(
+    env,
+    policy,
+    key,
+    num_episodes=10_000,
+    n=1,
+    alpha=0.1,
+    gamma=1.0,
+    max_steps=1000,
+):
+    """
+    Online n-step SARSA control.
+
+    Returns:
+        Q: (S, A) estimated action values.
+    """
+    Q = jnp.zeros((env.num_states, env.num_actions), dtype=jnp.float32)
+    for _ in range(num_episodes):
+        reward_buffer = [0.0] * n
+        state_buffer = [None] * (n + 1)
+        action_buffer = [None] * (n + 1)
+
+        terminated = False
+        t = 0
+        T = float('inf')
+
+        key, env_key, action_key = jax.random.split(key, 3)
+        env_state, observation = env.reset(env_key)
+        state_buffer[t % (n + 1)] = observation
+        action = policy.select_action(action_key, Q[observation])
+        action_buffer[t % (n + 1)] = action
+        while True:
+            if not terminated:
+                key, env_key, action_key = jax.random.split(key, 3)
+                new_state, new_observation, reward, terminated, _ = env.step(env_key, env_state, action)
+                reward_buffer[t % n] = reward
+                state_buffer[(t + 1) % (n + 1)] = new_observation
+                if bool(terminated):
+                    T = t + 1
+                else:
+                    new_action = policy.select_action(action_key, Q[new_observation])
+                    action_buffer[(t + 1) % (n + 1)] = new_action
+                    action = new_action
+                env_state = new_state
+                observation = new_observation
+
+                if not bool(terminated) and t + 1 >= max_steps:
+                    raise RuntimeError(
+                        f"Episode did not terminate within {max_steps} steps"
+                    )
+
+            tau = t - n + 1
+            if tau >= 0:
+                action_value = n_step_sarsa_return(reward_buffer,
+                                                   state_buffer,
+                                                   action_buffer,
+                                                   Q, tau, T, n, gamma)
+                s_tau = state_buffer[tau % (n + 1)]
+                a_tau = action_buffer[tau % (n + 1)]
+                delta = alpha * (action_value - Q[s_tau, a_tau])
+                Q = Q.at[s_tau, a_tau].add(delta)
+
+            if tau == T - 1:
+                break
+
+            t += 1
+    return Q
+
