@@ -663,3 +663,145 @@ def n_step_sarsa_jit(
         )
 
     return Q
+
+
+
+def n_step_importance_sampling_ratio(
+    states,
+    actions,
+    behavior_prob_buffer,
+    target_policy,
+    Q,
+    tau,
+    T,
+    n,
+):
+    """
+    Calculate the importance-sampling ratio for
+    off-policy n-step SARSA.
+
+    Args:
+        states: (n+1,) circular buffer of state indices.
+        actions: (n+1,) circular buffer of action indices.
+        target_probs: (S, A) target policy probabilities.
+        behavior_probs: (S, A) behavior policy probabilities.
+        tau: Time index of the state-action pair being updated.
+        T: Episode termination time.
+        n: Number of steps.
+        
+    Returns:
+        Scalar importance-sampling ratio.
+    """
+    rho = 1.0
+
+    for k in range(tau + 1, min(tau + n, T - 1) + 1):
+        index = k % (n + 1)
+
+        state = states[index]
+        action = actions[index]
+        q_values = Q[state]
+        pi = target_policy.action_probs(q_values)[action]
+        b = behavior_prob_buffer[index]
+
+        rho *= pi / b
+
+    return rho
+
+
+
+def off_policy_n_step_sarsa(
+    env,
+    behavior_policy,
+    target_policy,
+    key,
+    num_episodes=10_000,
+    n=1,
+    alpha=0.1,
+    gamma=1.0,
+    max_steps=1000,
+):
+    """
+    Online n-step SARSA control.
+
+    Returns:
+        Q: (S, A) estimated action values.
+    """
+    if n < 1:
+        raise ValueError("n must be positive")
+
+    if max_steps < 1:
+        raise ValueError("max_steps must be positive")
+
+    Q = jnp.zeros((env.num_states, env.num_actions), dtype=jnp.float32)
+    for _ in range(num_episodes):
+        reward_buffer = [0.0] * n
+        state_buffer = [None] * (n + 1)
+        action_buffer = [None] * (n + 1)
+        behavior_prob_buffer = [0.0] * (n + 1)
+
+        terminated = False
+        t = 0
+        T = float('inf')
+
+        key, env_key, action_key = jax.random.split(key, 3)
+        env_state, observation = env.reset(env_key)
+        state_buffer[t % (n + 1)] = observation
+        action = behavior_policy.select_action(action_key, Q[observation])
+        behavior_prob_buffer[t % (n + 1)] = (
+            behavior_policy.action_probs(Q[observation])[action]
+        )
+        action_buffer[t % (n + 1)] = action
+        while True:
+            if not terminated:
+                key, env_key, action_key = jax.random.split(key, 3)
+                new_state, new_observation, reward, terminated, _ = env.step(env_key, env_state, action)
+                reward_buffer[t % n] = reward
+                state_buffer[(t + 1) % (n + 1)] = new_observation
+                if bool(terminated):
+                    T = t + 1
+                else:
+                    q_values = Q[new_observation]
+                    new_action = behavior_policy.select_action(
+                        action_key, q_values
+                    )
+
+                    index = (t + 1) % (n + 1)
+
+                    action_buffer[index] = new_action
+                    behavior_prob_buffer[index] = (
+                        behavior_policy.action_probs(q_values)[new_action]
+                    )
+
+                    action = new_action
+
+                env_state = new_state
+                observation = new_observation
+
+
+                if not bool(terminated) and t + 1 >= max_steps:
+                    raise RuntimeError(
+                        f"Episode did not terminate within {max_steps} steps"
+                    )
+
+            tau = t - n + 1
+            if tau >= 0:
+                action_value = n_step_sarsa_return(reward_buffer,
+                                                   state_buffer,
+                                                   action_buffer,
+                                                   Q, tau, T, n, gamma)
+                rho = n_step_importance_sampling_ratio(state_buffer, 
+                                                                    action_buffer, 
+                                                                    behavior_prob_buffer,
+                                                                    target_policy, 
+                                                                    Q, tau, T, n)
+                s_tau = state_buffer[tau % (n + 1)]
+                a_tau = action_buffer[tau % (n + 1)]
+                delta = alpha * rho * (action_value - Q[s_tau, a_tau])
+                Q = Q.at[s_tau, a_tau].add(delta)
+
+            if tau == T - 1:
+                break
+
+            t += 1
+    return Q
+

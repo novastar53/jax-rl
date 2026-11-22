@@ -2085,14 +2085,6 @@ from jax_rl.td.sarsa import n_step_sarsa
 
 
 class NStepSarsaActionTestEnv:
-    """
-    Two transitions:
-
-    S0 --(+2)--> S1 --(+4)--> S2 (terminal)
-
-    Records the actions actually executed.
-    """
-
     num_states = 3
     num_actions = 2
 
@@ -2559,3 +2551,359 @@ def test_n_step_sarsa_jit_truncation_bootstraps():
     # Q = 2.5 + 0.5 * (3.5 - 2.5) = 3.0
 
     assert jnp.allclose(Q, jnp.array([[3.0]]))
+
+
+from jax_rl.td.sarsa import n_step_importance_sampling_ratio
+
+
+class FixedDistributionPolicy:
+    def __init__(self, probs):
+        self.probs = jnp.asarray(probs, dtype=jnp.float32)
+
+    def action_probs(self, q_values):
+        return self.probs
+
+    def select_action(self, key, q_values):
+        return jax.random.choice(
+            key,
+            a=len(self.probs),
+            p=self.action_probs(q_values),
+        )
+
+from jax_rl.td.sarsa import off_policy_n_step_sarsa
+
+
+
+class TestOffPolicyNStepSarsa:
+    def setup_method(self):
+        self.env = NStepSarsaActionTestEnv()
+        self.behavior_policy = FixedDistributionPolicy([1.0, 0.0])
+        self.key = jax.random.key(42)
+
+    @pytest.mark.parametrize(
+        "n, expected",
+        [
+            (1, [1.0, 2.0, 0.0]),
+            (2, [3.0, 2.0, 0.0]),
+            (5, [3.0, 2.0, 0.0]),
+        ],
+    )
+    def test_identical_deterministic_policies(self, n, expected):
+        Q = off_policy_n_step_sarsa(
+            self.env,
+            self.behavior_policy,
+            self.behavior_policy,
+            self.key,
+            num_episodes=1,
+            n=n,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        assert jnp.allclose(
+            Q[:, 0],
+            jnp.array(expected),
+        )
+
+        assert jnp.allclose(Q[:, 1], 0.0)
+
+    def test_importance_sampling_scales_update(self):
+        target_policy = FixedDistributionPolicy([0.5, 0.5])
+
+        Q = off_policy_n_step_sarsa(
+            self.env,
+            self.behavior_policy,
+            target_policy,
+            self.key,
+            num_episodes=1,
+            n=2,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        # At tau=0:
+        # G = 2 + 4 = 6
+        # rho = pi(A1=0) / b(A1=0) = 0.5 / 1 = 0.5
+        # Q(S0,0) = 0.5 * 0.5 * 6 = 1.5
+        #
+        # At tau=1:
+        # G = 4
+        # rho = 1 (empty product)
+        # Q(S1,0) = 0.5 * 4 = 2
+
+        expected = jnp.array([
+            [1.5, 0.0],
+            [2.0, 0.0],
+            [0.0, 0.0],
+        ])
+
+        assert jnp.allclose(Q, expected)
+
+    def test_zero_importance_ratio(self):
+        target_policy = FixedDistributionPolicy([0.0, 1.0])
+
+        Q = off_policy_n_step_sarsa(
+            self.env,
+            self.behavior_policy,
+            target_policy,
+            self.key,
+            num_episodes=1,
+            n=2,
+            alpha=0.5,
+        )
+
+        # At tau=0, the intermediate action A1=0
+        # has zero probability under the target policy.
+        # Therefore rho=0 and Q(S0,0) is unchanged.
+        #
+        # At tau=1, the ratio is an empty product.
+        # Q(S1,0) still receives its terminal update.
+
+        expected = jnp.array([
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 0.0],
+        ])
+
+        assert jnp.allclose(Q, expected)
+
+    def test_one_step_bootstrap_action_correction(self):
+        target_policy = FixedDistributionPolicy([0.5, 0.5])
+
+        Q = off_policy_n_step_sarsa(
+            self.env,
+            self.behavior_policy,
+            target_policy,
+            self.key,
+            num_episodes=1,
+            n=1,
+            alpha=0.5,
+        )
+
+        # The one-step return bootstraps from A1=0.
+        # Its importance ratio is 0.5 / 1 = 0.5.
+        #
+        # Q(S0,0) = 0.5 * 0.5 * (2 + 0) = 0.5
+        # Q(S1,0) = 0.5 * 4 = 2
+
+        expected = jnp.array([
+            [0.5, 0.0],
+            [2.0, 0.0],
+            [0.0, 0.0],
+        ])
+
+        assert jnp.allclose(Q, expected)
+
+    def test_discounting(self):
+        Q = off_policy_n_step_sarsa(
+            self.env,
+            self.behavior_policy,
+            self.behavior_policy,
+            self.key,
+            num_episodes=1,
+            n=2,
+            alpha=0.5,
+            gamma=0.5,
+        )
+
+        # G0 = 2 + 0.5 * 4 = 4
+        # G1 = 4
+        # Both importance ratios are 1.
+
+        expected = jnp.array([
+            [2.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 0.0],
+        ])
+
+        assert jnp.allclose(Q, expected)
+
+    def test_multiple_episodes(self):
+        target_policy = FixedDistributionPolicy([0.5, 0.5])
+
+        Q = off_policy_n_step_sarsa(
+            self.env,
+            self.behavior_policy,
+            target_policy,
+            self.key,
+            num_episodes=2,
+            n=2,
+            alpha=0.5,
+        )
+
+        # Episode 1: Q(S0,0)=1.5, Q(S1,0)=2
+        #
+        # Episode 2:
+        # Q(S0,0) = 1.5 + 0.5*0.5*(6-1.5)
+        #         = 2.625
+        # Q(S1,0) = 2 + 0.5*(4-2) = 3
+
+        expected = jnp.array([
+            [2.625, 0.0],
+            [3.0, 0.0],
+            [0.0, 0.0],
+        ])
+
+        assert jnp.allclose(Q, expected)
+
+    def test_zero_episodes(self):
+        Q = off_policy_n_step_sarsa(
+            self.env,
+            self.behavior_policy,
+            self.behavior_policy,
+            self.key,
+            num_episodes=0,
+            n=3,
+        )
+
+        assert jnp.array_equal(Q, jnp.zeros((3, 2)))
+
+    def test_exact_max_steps(self):
+        Q = off_policy_n_step_sarsa(
+            self.env,
+            self.behavior_policy,
+            self.behavior_policy,
+            self.key,
+            num_episodes=1,
+            n=3,
+            alpha=0.5,
+            max_steps=2,
+        )
+
+        assert jnp.allclose(
+            Q[:, 0],
+            jnp.array([3.0, 2.0, 0.0]),
+        )
+
+    def test_max_steps_exceeded(self):
+        with pytest.raises(
+            RuntimeError,
+            match="did not terminate",
+        ):
+            off_policy_n_step_sarsa(
+                self.env,
+                self.behavior_policy,
+                self.behavior_policy,
+                self.key,
+                num_episodes=1,
+                n=3,
+                max_steps=1,
+            )
+
+    @pytest.mark.parametrize("n", [0, -1])
+    def test_invalid_n(self, n):
+        with pytest.raises(ValueError, match="n must be positive"):
+            off_policy_n_step_sarsa(
+                self.env,
+                self.behavior_policy,
+                self.behavior_policy,
+                self.key,
+                n=n,
+            )
+
+    def test_invalid_max_steps(self):
+        with pytest.raises(
+            ValueError,
+            match="max_steps must be positive",
+        ):
+            off_policy_n_step_sarsa(
+                self.env,
+                self.behavior_policy,
+                self.behavior_policy,
+                self.key,
+                max_steps=0,
+            )
+
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+def test_off_policy_n_step_sarsa_matches_on_policy(n):
+    env = NStepSarsaActionTestEnv()
+    policy = FixedDistributionPolicy([0.75, 0.25])
+    key = jax.random.key(42)
+
+    kwargs = dict(
+        num_episodes=20,
+        n=n,
+        alpha=0.1,
+        gamma=0.9,
+        max_steps=10,
+    )
+
+    Q_on_policy = n_step_sarsa(
+        env,
+        policy,
+        key,
+        **kwargs,
+    )
+
+    Q_off_policy = off_policy_n_step_sarsa(
+        env,
+        policy,
+        policy,
+        key,
+        **kwargs,
+    )
+
+    assert jnp.allclose(
+        Q_on_policy,
+        Q_off_policy,
+        atol=1e-6,
+    )
+
+
+
+def test_n_step_ratio_uses_recorded_behavior_probability():
+    n = 2
+
+    states = [0, 1, 2]
+    actions = [0, 0, 0]
+
+    # The behavior probability of A1 was 0.8
+    # when that action was originally selected.
+    behavior_prob_buffer = [1.0, 0.8, 1.0]
+
+    target_policy = FixedDistributionPolicy([0.5, 0.5])
+    Q = jnp.zeros((3, 2))
+
+    rho = n_step_importance_sampling_ratio(
+        states,
+        actions,
+        behavior_prob_buffer,
+        target_policy,
+        Q,
+        tau=0,
+        T=2,
+        n=n,
+    )
+
+    # A1 is the only action included.
+    # rho = 0.5 / 0.8 = 0.625
+
+    assert jnp.isclose(rho, 0.625)
+
+
+
+def test_off_policy_environment_terminates():
+    env = NStepSarsaActionTestEnv()
+    key = jax.random.key(42)
+
+    env_state, observation = env.reset(key)
+
+    assert int(observation) == 0
+
+    env_state, observation, reward, terminated, _ = env.step(
+        key, env_state, jnp.int32(0)
+    )
+
+    assert int(observation) == 1
+    assert reward == 2.0
+    assert not bool(terminated)
+
+    env_state, observation, reward, terminated, _ = env.step(
+        key, env_state, jnp.int32(0)
+    )
+
+    assert int(observation) == 2
+    assert reward == 4.0
+    assert bool(terminated)
