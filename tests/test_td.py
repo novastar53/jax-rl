@@ -2512,3 +2512,50 @@ def test_n_step_sarsa_jit_max_steps_exceeded():
         )
 
 
+
+class JitNeverTerminatingSarsaEnv:
+    num_states = 1
+    num_actions = 1
+
+    def reset(self, key):
+        return jnp.int32(0), jnp.int32(0)
+
+    def step(self, key, env_state, action):
+        return (
+            env_state,
+            jnp.int32(0),
+            jnp.float32(1.0),
+            jnp.bool_(False),
+            {},
+        )
+
+
+def test_n_step_sarsa_jit_truncation_bootstraps():
+    env = JitNeverTerminatingSarsaEnv()
+    policy = EpsilonGreedyPolicy(epsilon=0.0)
+
+    Q = n_step_sarsa_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=2,
+        n=3,
+        alpha=0.5,
+        gamma=1.0,
+        max_steps=2,
+        truncate=True,
+    )
+
+    # Episode 1:
+    # G0 = 1 + 1 + Q(S2,A2) = 2
+    # Q = 0 + 0.5 * 2 = 1
+    # G1 = 1 + Q(S2,A2) = 2
+    # Q = 1 + 0.5 * (2 - 1) = 1.5
+    #
+    # Episode 2:
+    # G0 = 1 + 1 + 1.5 = 3.5
+    # Q = 1.5 + 0.5 * (3.5 - 1.5) = 2.5
+    # G1 = 1 + 2.5 = 3.5
+    # Q = 2.5 + 0.5 * (3.5 - 2.5) = 3.0
+
+    assert jnp.allclose(Q, jnp.array([[3.0]]))

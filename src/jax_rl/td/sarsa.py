@@ -355,6 +355,7 @@ def n_step_sarsa(
         "num_episodes",
         "n",
         "max_steps",
+        "truncate"
     ),
 )
 def _n_step_sarsa_jit(
@@ -366,6 +367,7 @@ def _n_step_sarsa_jit(
     alpha,
     gamma,
     max_steps,
+    truncate,
 ):
     Q = jnp.zeros(
         (env.num_states, env.num_actions),
@@ -406,6 +408,7 @@ def _n_step_sarsa_jit(
                 jnp.int32(0),              # t
                 jnp.int32(max_steps + 1),  # T
                 jnp.bool_(False),          # terminated
+                jnp.bool_(False),          # truncated
                 jnp.bool_(False),          # failed
                 jnp.bool_(False),          # done
             )
@@ -417,8 +420,9 @@ def _n_step_sarsa_jit(
                 (
                     Q, key, env_state, observation, action,
                     states, actions, rewards, t, T,
-                    terminated, failed, done,
+                    terminated, truncated, failed, done,
                 ) = carry
+
 
                 def take_step(_):
                     next_key, env_key, action_key = jax.random.split(
@@ -437,33 +441,33 @@ def _n_step_sarsa_jit(
                         (t + 1) % (n + 1)
                     ].set(next_observation)
 
-                    next_rewards = rewards.at[
-                        t % n
-                    ].set(reward)
+                    next_rewards = rewards.at[t % n].set(reward)
+
+                    reached_limit = (t + 1 >= max_steps) & (~is_terminal)
+
+                    is_truncated = reached_limit & truncate
+                    step_failed = reached_limit & (not truncate)
+
+                    episode_ended = is_terminal | is_truncated
 
                     next_T = jnp.where(
-                        is_terminal, t + 1, T
+                        episode_ended, t + 1, T
                     )
 
-                    def select_next_action(_):
-                        return policy.select_action(
-                            action_key, Q[next_observation]
-                        )
-
+                    # A new action is needed at a time-limit cutoff
+                    # because the pending returns must bootstrap.
                     next_action = jax.lax.cond(
                         is_terminal,
                         lambda _: action,
-                        select_next_action,
+                        lambda _: policy.select_action(
+                            action_key, Q[next_observation]
+                        ),
                         operand=None,
                     )
 
                     next_actions = actions.at[
                         (t + 1) % (n + 1)
                     ].set(next_action)
-
-                    step_failed = (
-                        ~is_terminal
-                    ) & (t + 1 >= max_steps)
 
                     return (
                         next_key,
@@ -474,10 +478,11 @@ def _n_step_sarsa_jit(
                         next_actions,
                         next_rewards,
                         next_T,
-                        is_terminal,
+                        episode_ended,
+                        is_truncated,
                         step_failed,
                     )
-
+ 
                 def flush_pending(_):
                     return (
                         key,
@@ -489,6 +494,7 @@ def _n_step_sarsa_jit(
                         rewards,
                         T,
                         terminated,
+                        truncated,
                         jnp.bool_(False),
                     )
 
@@ -502,6 +508,7 @@ def _n_step_sarsa_jit(
                     rewards,
                     T,
                     terminated,
+                    truncated,
                     step_failed,
                 ) = jax.lax.cond(
                     terminated,
@@ -529,20 +536,24 @@ def _n_step_sarsa_jit(
                         jnp.float32(0.0),
                     )
 
+                    bootstrap_time = jnp.minimum(tau + n, T)
+
+                    should_bootstrap = (tau + n < T) | truncated
+
                     def add_bootstrap(G):
-                        index = (tau + n) % (n + 1)
+                        index = bootstrap_time % (n + 1)
 
                         bootstrap_state = states[index]
                         bootstrap_action = actions[index]
 
                         return (
                             G
-                            + gamma ** n
+                            + gamma ** (bootstrap_time - tau)
                             * Q[bootstrap_state, bootstrap_action]
                         )
 
                     G = jax.lax.cond(
-                        tau + n < T,
+                        should_bootstrap,
                         add_bootstrap,
                         lambda G: G,
                         G,
@@ -556,6 +567,7 @@ def _n_step_sarsa_jit(
                     return Q.at[s_tau, a_tau].add(
                         alpha * (G - Q[s_tau, a_tau])
                     )
+
 
                 Q = jax.lax.cond(
                     (tau >= 0) & (~step_failed),
@@ -578,6 +590,7 @@ def _n_step_sarsa_jit(
                     t + 1,
                     T,
                     terminated,
+                    truncated,
                     step_failed,
                     done,
                 )
@@ -588,7 +601,7 @@ def _n_step_sarsa_jit(
                 initial,
             )
 
-            return final[0], final[1], final[11]
+            return final[0], final[1], final[12]
 
         next_carry = jax.lax.cond(
             failed,
@@ -618,6 +631,7 @@ def n_step_sarsa_jit(
     alpha=0.1,
     gamma=1.0,
     max_steps=1000,
+    truncate=False,
 ):
     """
     JIT-compiled online n-step SARSA control.
@@ -640,6 +654,7 @@ def n_step_sarsa_jit(
         alpha,
         gamma,
         max_steps,
+        truncate,
     )
 
     if bool(failed):
