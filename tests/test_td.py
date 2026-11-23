@@ -2907,3 +2907,637 @@ def test_off_policy_environment_terminates():
     assert int(observation) == 2
     assert reward == 4.0
     assert bool(terminated)
+
+
+from jax_rl.td.sarsa import off_policy_n_step_sarsa_jit
+
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+@pytest.mark.parametrize("gamma", [0.5, 1.0])
+@pytest.mark.parametrize("num_episodes", [1, 20])
+def test_off_policy_n_step_sarsa_jit_matches_reference(
+    n, gamma, num_episodes
+):
+    env = Gridworld(size=4)
+    behavior_policy = EpsilonGreedyPolicy(epsilon=0.2)
+    target_policy = EpsilonGreedyPolicy(epsilon=0.1)
+    key = jax.random.key(42)
+
+    kwargs = dict(
+        num_episodes=num_episodes,
+        n=n,
+        alpha=0.1,
+        gamma=gamma,
+        max_steps=1000,
+    )
+
+    Q_reference = off_policy_n_step_sarsa(
+        env, behavior_policy, target_policy, key, **kwargs
+    )
+
+    Q_jit = off_policy_n_step_sarsa_jit(
+        env, behavior_policy, target_policy, key, **kwargs
+    )
+
+    assert jnp.allclose(
+        Q_reference, Q_jit,
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+
+@pytest.mark.parametrize(
+    "n, expected_first",
+    [
+        (1, 0.5),
+        (2, 1.5),
+        (5, 1.5),
+    ],
+)
+def test_off_policy_n_step_sarsa_jit_importance_sampling(
+    n, expected_first
+):
+    env = JitNStepSarsaActionTestEnv()
+
+    behavior_policy = FixedDistributionPolicy([1.0, 0.0])
+    target_policy = FixedDistributionPolicy([0.5, 0.5])
+
+    Q = off_policy_n_step_sarsa_jit(
+        env,
+        behavior_policy,
+        target_policy,
+        jax.random.key(42),
+        num_episodes=1,
+        n=n,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    expected = jnp.array([
+        [expected_first, 0.0],
+        [2.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    assert jnp.allclose(Q, expected)
+
+
+def test_off_policy_n_step_sarsa_jit_max_steps():
+    env = JitNStepSarsaActionTestEnv()
+    policy = FixedDistributionPolicy([1.0, 0.0])
+
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        off_policy_n_step_sarsa_jit(
+            env,
+            policy,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            n=3,
+            max_steps=1,
+        )
+
+
+def test_off_policy_n_step_sarsa_jit_zero_episodes():
+    env = JitNStepSarsaActionTestEnv()
+    policy = FixedDistributionPolicy([1.0, 0.0])
+
+    Q = off_policy_n_step_sarsa_jit(
+        env,
+        policy,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+        n=3,
+    )
+
+    assert jnp.array_equal(Q, jnp.zeros((3, 2)))
+
+
+from jax_rl.td.q_learning import double_q_learning_update
+
+
+class TestDoubleQLearningUpdate:
+    def setup_method(self):
+        self.Q1 = jnp.array([
+            [0.0, 0.0],
+            [5.0, 2.0],
+        ])
+
+        self.Q2 = jnp.array([
+            [0.0, 0.0],
+            [1.0, 4.0],
+        ])
+
+    def test_update_first_table(self):
+        Q1, Q2 = double_q_learning_update(
+            self.Q1,
+            self.Q2,
+            state=0,
+            action=0,
+            reward=2.0,
+            next_state=1,
+            terminated=False,
+            update_first=True,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        # Q1 selects action 0 because 5 > 2.
+        # Q2 evaluates that action at 1.
+        # Target = 2 + 1 = 3
+        # Q1(0,0) = 0 + 0.5 * 3 = 1.5
+
+        expected_Q1 = self.Q1.at[0, 0].set(1.5)
+
+        assert jnp.allclose(Q1, expected_Q1)
+        assert jnp.array_equal(Q2, self.Q2)
+
+    def test_update_second_table(self):
+        Q1, Q2 = double_q_learning_update(
+            self.Q1,
+            self.Q2,
+            state=0,
+            action=0,
+            reward=2.0,
+            next_state=1,
+            terminated=False,
+            update_first=False,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        # Q2 selects action 1 because 4 > 1.
+        # Q1 evaluates that action at 2.
+        # Target = 2 + 2 = 4
+        # Q2(0,0) = 0 + 0.5 * 4 = 2
+
+        expected_Q2 = self.Q2.at[0, 0].set(2.0)
+
+        assert jnp.array_equal(Q1, self.Q1)
+        assert jnp.allclose(Q2, expected_Q2)
+
+    @pytest.mark.parametrize("update_first", [True, False])
+    def test_terminal_transition(self, update_first):
+        Q1, Q2 = double_q_learning_update(
+            self.Q1,
+            self.Q2,
+            state=0,
+            action=0,
+            reward=-10.0,
+            next_state=1,
+            terminated=True,
+            update_first=update_first,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        # Terminal target = -10.
+        # The selected table receives -5.
+
+        if update_first:
+            assert jnp.isclose(Q1[0, 0], -5.0)
+            assert jnp.array_equal(Q2, self.Q2)
+        else:
+            assert jnp.isclose(Q2[0, 0], -5.0)
+            assert jnp.array_equal(Q1, self.Q1)
+
+    def test_discounting(self):
+        Q1, Q2 = double_q_learning_update(
+            self.Q1,
+            self.Q2,
+            state=0,
+            action=0,
+            reward=2.0,
+            next_state=1,
+            terminated=False,
+            update_first=True,
+            alpha=0.5,
+            gamma=0.5,
+        )
+
+        # Q1 selects action 0; Q2 evaluates it at 1.
+        # Target = 2 + 0.5 * 1 = 2.5
+        # Updated Q1(0,0) = 0.5 * 2.5 = 1.25
+
+        assert jnp.isclose(Q1[0, 0], 1.25)
+        assert jnp.array_equal(Q2, self.Q2)
+
+    def test_zero_discount(self):
+        Q1, Q2 = double_q_learning_update(
+            self.Q1,
+            self.Q2,
+            state=0,
+            action=0,
+            reward=2.0,
+            next_state=1,
+            terminated=False,
+            update_first=True,
+            alpha=0.5,
+            gamma=0.0,
+        )
+
+        # Only the immediate reward contributes.
+        assert jnp.isclose(Q1[0, 0], 1.0)
+        assert jnp.array_equal(Q2, self.Q2)
+
+    def test_existing_action_value(self):
+        Q1 = self.Q1.at[0, 0].set(4.0)
+
+        updated_Q1, updated_Q2 = double_q_learning_update(
+            Q1,
+            self.Q2,
+            state=0,
+            action=0,
+            reward=2.0,
+            next_state=1,
+            terminated=False,
+            update_first=True,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        # Target = 2 + Q2(1,0) = 3
+        # Q1(0,0) = 4 + 0.5 * (3 - 4) = 3.5
+
+        assert jnp.isclose(updated_Q1[0, 0], 3.5)
+        assert jnp.array_equal(updated_Q2, self.Q2)
+
+    def test_decoupled_selection_and_evaluation(self):
+        Q1, Q2 = double_q_learning_update(
+            self.Q1,
+            self.Q2,
+            state=0,
+            action=0,
+            reward=0.0,
+            next_state=1,
+            terminated=False,
+            update_first=True,
+            alpha=1.0,
+            gamma=1.0,
+        )
+
+        # Q1(next_state) = [5, 2]
+        # Q2(next_state) = [1, 4]
+        #
+        # Correct Double Q-learning target: Q2(1,0) = 1
+        # Incorrect ordinary Q-learning target: max(Q1(1)) = 5
+
+        assert jnp.isclose(Q1[0, 0], 1.0)
+        assert jnp.array_equal(Q2, self.Q2)
+
+    def test_no_in_place_mutation(self):
+        original_Q1 = self.Q1.copy()
+        original_Q2 = self.Q2.copy()
+
+        double_q_learning_update(
+            self.Q1,
+            self.Q2,
+            state=0,
+            action=0,
+            reward=2.0,
+            next_state=1,
+            terminated=False,
+            update_first=True,
+            alpha=0.5,
+        )
+
+        assert jnp.array_equal(self.Q1, original_Q1)
+        assert jnp.array_equal(self.Q2, original_Q2)
+
+
+from jax_rl.td.q_learning import double_q_learning
+
+
+
+class TestDoubleQLearning:
+    def setup_method(self):
+        self.env = SarsaTestEnv()
+        self.policy = FixedActionPolicy(action=0)
+        self.key = jax.random.key(42)
+
+    def test_zero_episodes(self):
+        Q1, Q2 = double_q_learning(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=0,
+        )
+
+        expected = jnp.zeros(
+            (self.env.num_states, self.env.num_actions)
+        )
+
+        assert jnp.array_equal(Q1, expected)
+        assert jnp.array_equal(Q2, expected)
+
+    def test_single_episode(self):
+        Q1, Q2 = double_q_learning(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        # Each transition updates exactly one Q-table.
+        # Initially both tables are zero.
+        #
+        # First transition: target = 2
+        # Second transition: terminal target = 4
+
+        combined = Q1 + Q2
+
+        expected = jnp.array([
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 0.0],
+        ])
+
+        assert jnp.allclose(combined, expected)
+
+        # Each state-action pair is updated in exactly
+        # one of the two tables.
+        assert jnp.all((Q1 * Q2) == 0)
+
+    def test_multiple_episodes_updates_both_tables(self):
+        Q1, Q2 = double_q_learning(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=100,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        assert bool(jnp.any(Q1 != 0))
+        assert bool(jnp.any(Q2 != 0))
+
+        assert bool(jnp.all(jnp.isfinite(Q1)))
+        assert bool(jnp.all(jnp.isfinite(Q2)))
+
+    def test_reproducibility(self):
+        kwargs = dict(
+            num_episodes=20,
+            alpha=0.1,
+            gamma=0.9,
+        )
+
+        Q1_a, Q2_a = double_q_learning(
+            self.env, self.policy, self.key, **kwargs
+        )
+
+        Q1_b, Q2_b = double_q_learning(
+            self.env, self.policy, self.key, **kwargs
+        )
+
+        assert jnp.array_equal(Q1_a, Q1_b)
+        assert jnp.array_equal(Q2_a, Q2_b)
+
+    def test_terminal_state_not_updated(self):
+        Q1, Q2 = double_q_learning(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=20,
+            alpha=0.5,
+        )
+
+        assert jnp.array_equal(Q1[2], jnp.zeros(2))
+        assert jnp.array_equal(Q2[2], jnp.zeros(2))
+
+    def test_exact_max_steps(self):
+        Q1, Q2 = double_q_learning(
+            self.env,
+            self.policy,
+            self.key,
+            num_episodes=1,
+            alpha=0.5,
+            max_steps=2,
+        )
+
+        expected = jnp.array([
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 0.0],
+        ])
+
+        assert jnp.allclose(Q1 + Q2, expected)
+
+    def test_max_steps_exceeded(self):
+        with pytest.raises(
+            RuntimeError,
+            match="did not terminate",
+        ):
+            double_q_learning(
+                self.env,
+                self.policy,
+                self.key,
+                num_episodes=1,
+                max_steps=1,
+            )
+
+    def test_action_selection_uses_combined_values(self):
+        class RecordingPolicy:
+            def __init__(self):
+                self.q_values_seen = []
+
+            def select_action(self, key, q_values):
+                self.q_values_seen.append(
+                    jnp.array(q_values)
+                )
+                return jnp.int32(0)
+
+        policy = RecordingPolicy()
+
+        Q1, Q2 = double_q_learning(
+            self.env,
+            policy,
+            self.key,
+            num_episodes=2,
+            alpha=0.5,
+            gamma=1.0,
+        )
+
+        # One action selected per nonterminal state:
+        # two actions per episode.
+        assert len(policy.q_values_seen) == 4
+
+        # Initial Q values are zero.
+        assert jnp.array_equal(
+            policy.q_values_seen[0],
+            jnp.zeros(2),
+        )
+
+        # At the start of episode 2, the combined
+        # action values at S0 reflect episode 1.
+        assert jnp.allclose(
+            policy.q_values_seen[2],
+            jnp.array([1.0, 0.0]),
+        )
+
+
+
+def test_double_q_learning_table_selection():
+    env = SarsaTestEnv()
+    policy = FixedActionPolicy(action=0)
+    key = jax.random.key(42)
+
+    # Reproduce the exact PRNG sequence for one episode.
+    key, _, _ = jax.random.split(key, 3)
+
+    update_choices = []
+
+    for _ in range(2):
+        key, _, _, update_key = jax.random.split(key, 4)
+
+        update_choices.append(
+            bool(jax.random.bernoulli(update_key, p=0.5))
+        )
+
+    Q1, Q2 = double_q_learning(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+        gamma=1.0,
+    )
+
+    for state, update_first in enumerate(update_choices):
+        expected_value = 1.0 if state == 0 else 2.0
+
+        if update_first:
+            assert jnp.isclose(Q1[state, 0], expected_value)
+            assert jnp.isclose(Q2[state, 0], 0.0)
+        else:
+            assert jnp.isclose(Q2[state, 0], expected_value)
+            assert jnp.isclose(Q1[state, 0], 0.0)
+
+
+from jax_rl.td.q_learning import double_q_learning_jit
+
+
+@pytest.mark.parametrize("gamma", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("num_episodes", [1, 20, 100])
+def test_double_q_learning_jit_matches_reference(
+    gamma, num_episodes
+):
+    env = Gridworld(size=4)
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+    key = jax.random.key(42)
+
+    kwargs = dict(
+        num_episodes=num_episodes,
+        alpha=0.1,
+        gamma=gamma,
+        max_steps=1000,
+    )
+
+    Q1_reference, Q2_reference = double_q_learning(
+        env, policy, key, **kwargs
+    )
+
+    Q1_jit, Q2_jit = double_q_learning_jit(
+        env, policy, key, **kwargs
+    )
+
+    assert jnp.allclose(
+        Q1_reference, Q1_jit,
+        atol=1e-5, rtol=1e-5,
+    )
+
+    assert jnp.allclose(
+        Q2_reference, Q2_jit,
+        atol=1e-5, rtol=1e-5,
+    )
+
+
+def test_double_q_learning_jit_zero_episodes():
+    env = Gridworld(size=4)
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q1, Q2 = double_q_learning_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=0,
+    )
+
+    expected = jnp.zeros(
+        (env.num_states, env.num_actions)
+    )
+
+    assert jnp.array_equal(Q1, expected)
+    assert jnp.array_equal(Q2, expected)
+
+
+def test_double_q_learning_jit_max_steps():
+    env = JitNStepTestEnv()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    with pytest.raises(
+        RuntimeError, match="did not terminate"
+    ):
+        double_q_learning_jit(
+            env,
+            policy,
+            jax.random.key(42),
+            num_episodes=1,
+            max_steps=1,
+        )
+
+
+def test_double_q_learning_jit_exact_max_steps():
+    env = JitNStepTestEnv()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q1, Q2 = double_q_learning_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=1,
+        alpha=0.5,
+        max_steps=2,
+    )
+
+    expected = jnp.array([
+        [1.0],
+        [2.0],
+        [0.0],
+    ])
+
+    assert jnp.allclose(Q1 + Q2, expected)
+
+
+def test_double_q_learning_jit_updates_both_tables():
+    env = JitNStepTestEnv()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    Q1, Q2 = double_q_learning_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=100,
+        alpha=0.5,
+    )
+
+    assert bool(jnp.any(Q1 != 0))
+    assert bool(jnp.any(Q2 != 0))
+
+
+def test_double_q_learning_jit_invalid_max_steps():
+    env = JitNStepTestEnv()
+    policy = EpsilonGreedyPolicy(epsilon=0.1)
+
+    with pytest.raises(ValueError, match="max_steps"):
+        double_q_learning_jit(
+            env,
+            policy,
+            jax.random.key(42),
+            max_steps=0,
+        )
+
+

@@ -238,3 +238,344 @@ def q_learning_jit(
         return Q, episode_returns
 
     return Q
+
+
+
+def double_q_learning_update(
+    Q1,
+    Q2,
+    state,
+    action,
+    reward,
+    next_state,
+    terminated,
+    update_first,
+    alpha=0.1,
+    gamma=1.0,
+):
+    """
+    Perform one Double Q-learning update.
+
+    Args:
+        Q1, Q2: (S, A) action-value tables.
+        state: Current state.
+        action: Action taken.
+        reward: Observed reward.
+        next_state: Next state.
+        terminated: Whether the transition is terminal.
+        update_first: If True update Q1, otherwise update Q2.
+        alpha: Learning rate.
+        gamma: Discount factor.
+
+    Returns:
+        Updated (Q1, Q2).
+    """
+    if update_first:
+        Q_update = Q1
+        Q_lookup = Q2
+    else:
+        Q_update = Q2
+        Q_lookup = Q1
+
+    if terminated:
+        delta = alpha * (reward - Q_update[state, action])
+    else:
+        next_action = jnp.argmax(Q_update[next_state])
+        delta = alpha * (reward + gamma * Q_lookup[next_state, next_action] - Q_update[state, action])
+
+    Q_update = Q_update.at[state, action].add(delta)
+
+    if update_first:
+        return Q_update, Q2
+    else:
+        return Q1, Q_update
+
+
+def double_q_learning(
+    env,
+    policy,
+    key,
+    num_episodes=10_000,
+    alpha=0.1,
+    gamma=1.0,
+    max_steps=1000,
+):
+    """
+    Tabular Double Q-learning control.
+
+    Returns:
+        Q1, Q2: Two learned action-value tables.
+    """
+    Q1 = jnp.zeros((env.num_states, env.num_actions), dtype=jnp.float32)
+    Q2 = jnp.zeros((env.num_states, env.num_actions), dtype=jnp.float32)
+
+    for _ in range(num_episodes):
+        key, env_key, action_key = jax.random.split(key, 3)
+        env_state, observation = env.reset(env_key)
+        action = policy.select_action(action_key, Q1[observation] + Q2[observation])
+        for _ in range(max_steps):
+            key, env_key, action_key, update_key = jax.random.split(key, 4)
+            new_state, new_observation, reward, terminated, _ = env.step(env_key, env_state, action)
+            update_first = jax.random.bernoulli(update_key, p=0.5)
+            Q1, Q2 = double_q_learning_update(Q1, Q2, observation, action, reward, new_observation, terminated, update_first, alpha, gamma)
+            if bool(terminated):
+                break
+            env_state, observation = new_state, new_observation
+            action = policy.select_action(action_key, Q1[observation] + Q2[observation])
+        else:
+            raise RuntimeError(
+                f"Episode did not terminate within {max_steps} steps"
+            )
+
+    return Q1, Q2
+
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "env",
+        "policy",
+        "num_episodes",
+        "max_steps",
+    ),
+)
+def _double_q_learning_jit(
+    env,
+    policy,
+    key,
+    num_episodes,
+    alpha,
+    gamma,
+    max_steps,
+):
+    Q1 = jnp.zeros(
+        (env.num_states, env.num_actions),
+        dtype=jnp.float32,
+    )
+    Q2 = jnp.zeros_like(Q1)
+
+    def train_episode(carry, _):
+        Q1, Q2, key, failed = carry
+
+        def skip_episode(_):
+            return Q1, Q2, key, failed
+
+        def run_episode(_):
+            episode_key, reset_key, action_key = (
+                jax.random.split(key, 3)
+            )
+
+            env_state, observation = env.reset(reset_key)
+
+            action = policy.select_action(
+                action_key,
+                Q1[observation] + Q2[observation],
+            )
+
+            initial = (
+                Q1,
+                Q2,
+                episode_key,
+                env_state,
+                observation,
+                action,
+                jnp.int32(0),       # steps
+                jnp.bool_(False),   # done
+                jnp.bool_(False),   # failed
+            )
+
+            def condition(carry):
+                return ~carry[7]
+
+            def step(carry):
+                (
+                    Q1, Q2, key, env_state,
+                    observation, action, steps,
+                    done, failed,
+                ) = carry
+
+                (
+                    next_key,
+                    step_key,
+                    action_key,
+                    update_key,
+                ) = jax.random.split(key, 4)
+
+                (
+                    next_env_state,
+                    next_observation,
+                    reward,
+                    terminated,
+                    _,
+                ) = env.step(step_key, env_state, action)
+
+                reward = jnp.asarray(
+                    reward, dtype=Q1.dtype
+                )
+
+                update_first = jax.random.bernoulli(
+                    update_key, p=0.5
+                )
+
+                def update_q1(_):
+                    def bootstrap(_):
+                        next_action = jnp.argmax(
+                            Q1[next_observation]
+                        )
+
+                        return (
+                            reward
+                            + gamma
+                            * Q2[next_observation, next_action]
+                        )
+
+                    target = jax.lax.cond(
+                        terminated,
+                        lambda _: reward,
+                        bootstrap,
+                        operand=None,
+                    )
+
+                    updated_Q1 = Q1.at[
+                        observation, action
+                    ].add(
+                        alpha
+                        * (target - Q1[observation, action])
+                    )
+
+                    return updated_Q1, Q2
+
+                def update_q2(_):
+                    def bootstrap(_):
+                        next_action = jnp.argmax(
+                            Q2[next_observation]
+                        )
+
+                        return (
+                            reward
+                            + gamma
+                            * Q1[next_observation, next_action]
+                        )
+
+                    target = jax.lax.cond(
+                        terminated,
+                        lambda _: reward,
+                        bootstrap,
+                        operand=None,
+                    )
+
+                    updated_Q2 = Q2.at[
+                        observation, action
+                    ].add(
+                        alpha
+                        * (target - Q2[observation, action])
+                    )
+
+                    return Q1, updated_Q2
+
+                Q1, Q2 = jax.lax.cond(
+                    update_first,
+                    update_q1,
+                    update_q2,
+                    operand=None,
+                )
+
+                next_action = jax.lax.cond(
+                    terminated,
+                    lambda _: action,
+                    lambda _: policy.select_action(
+                        action_key,
+                        Q1[next_observation]
+                        + Q2[next_observation],
+                    ),
+                    operand=None,
+                )
+
+                failed = (
+                    ~terminated
+                ) & (steps + 1 >= max_steps)
+
+                done = terminated | failed
+
+                return (
+                    Q1,
+                    Q2,
+                    next_key,
+                    next_env_state,
+                    next_observation,
+                    next_action,
+                    steps + 1,
+                    done,
+                    failed,
+                )
+
+            final = jax.lax.while_loop(
+                condition,
+                step,
+                initial,
+            )
+
+            return (
+                final[0],
+                final[1],
+                final[2],
+                final[8],
+            )
+
+        next_carry = jax.lax.cond(
+            failed,
+            skip_episode,
+            run_episode,
+            operand=None,
+        )
+
+        return next_carry, None
+
+    (Q1, Q2, _, failed), _ = jax.lax.scan(
+        train_episode,
+        (Q1, Q2, key, jnp.bool_(False)),
+        None,
+        length=num_episodes,
+    )
+
+    return Q1, Q2, failed
+
+
+def double_q_learning_jit(
+    env,
+    policy,
+    key,
+    num_episodes=10_000,
+    alpha=0.1,
+    gamma=1.0,
+    max_steps=1000,
+):
+    """
+    JIT-compiled tabular Double Q-learning.
+
+    Returns:
+        Q1, Q2: Two learned action-value tables.
+    """
+    if num_episodes < 0:
+        raise ValueError("num_episodes must be nonnegative")
+
+    if max_steps < 1:
+        raise ValueError("max_steps must be positive")
+
+    Q1, Q2, failed = _double_q_learning_jit(
+        env,
+        policy,
+        key,
+        num_episodes,
+        alpha,
+        gamma,
+        max_steps,
+    )
+
+    if bool(failed):
+        raise RuntimeError(
+            f"Episode did not terminate within {max_steps} steps"
+        )
+
+    return Q1, Q2

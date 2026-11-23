@@ -388,3 +388,62 @@ def test_cliff_step_jit():
     assert int(next_state) == 36
     assert float(reward) == -100.0
     assert not bool(terminated)
+
+
+from jax_rl.envs.maximization_bias import MaximizationBias
+
+
+def test_maximization_bias_left():
+    env = MaximizationBias()
+    key = jax.random.key(42)
+
+    state, observation = env.reset(key)
+
+    state, observation, reward, terminated, _ = env.step(
+        key, state, jnp.int32(0)
+    )
+
+    assert int(observation) == 1
+    assert float(reward) == 0.0
+    assert not bool(terminated)
+
+
+def test_maximization_bias_right():
+    env = MaximizationBias()
+    key = jax.random.key(42)
+
+    state, _ = env.reset(key)
+
+    state, observation, reward, terminated, _ = env.step(
+        key, state, jnp.int32(1)
+    )
+
+    assert int(observation) == 2
+    assert float(reward) == 0.0
+    assert bool(terminated)
+
+
+def test_maximization_bias_reward_distribution():
+    env = MaximizationBias()
+
+    keys = jax.random.split(
+        jax.random.key(42), 10_000
+    )
+
+    def sample(key):
+        _, _, reward, _, _ = env.step(
+            key, jnp.int32(1), jnp.int32(0)
+        )
+        return reward
+
+    rewards = jax.vmap(sample)(keys)
+
+    assert jnp.isclose(jnp.mean(rewards), -0.1, atol=0.05)
+    assert jnp.isclose(jnp.std(rewards), 1.0, atol=0.05)
+
+
+def test_maximization_bias_action_masks():
+    env = MaximizationBias()
+
+    assert int(jnp.sum(env.action_mask(0))) == 2
+    assert int(jnp.sum(env.action_mask(1))) == 10
