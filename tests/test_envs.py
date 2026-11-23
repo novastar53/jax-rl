@@ -3,7 +3,13 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from jax_rl.envs.gridworld import Gridworld, Action
+from jax_rl.envs.gridworld import Action, Gridworld
+from jax_rl.envs.cliff_walking import CliffWalking
+from jax_rl.envs.roulette import Roulette
+from jax_rl.envs.stochastic_gridworld import StochasticGridworld
+from jax_rl.envs.stochastic_cliff_walking import StochasticCliffWalking
+from jax_rl.envs.frozen_lake import FrozenLake
+
 
 
 @pytest.mark.parametrize(
@@ -447,3 +453,145 @@ def test_maximization_bias_action_masks():
 
     assert int(jnp.sum(env.action_mask(0))) == 2
     assert int(jnp.sum(env.action_mask(1))) == 10
+
+
+
+def test_roulette_shape_and_expected_values():
+    env = Roulette()
+    assert env.num_actions == 171
+    assert env.num_states == 2
+    assert len(env.bet_labels) == 170
+    assert env.stop_action == 170
+    assert jnp.isclose(float(env.expected_rewards[0]), -2 / 38)
+    idx = env.bet_labels.index("five-number top line")
+    assert jnp.isclose(float(env.expected_rewards[idx]), -3 / 38)
+    assert jnp.all(jnp.asarray(env.expected_rewards) < 0)
+
+
+def test_roulette_terminal_action():
+    env = Roulette()
+    state, obs = env.reset(jax.random.PRNGKey(0))
+    state, obs, reward, done, _ = env.step(jax.random.PRNGKey(1), state, env.stop_action)
+    assert int(state) == 1 and int(obs) == 1
+    assert bool(done) and float(reward) == 0
+    _, _, reward2, done2, _ = env.step(jax.random.PRNGKey(2), state, 0)
+    assert bool(done2) and float(reward2) == 0
+
+
+def test_roulette_all_rewards_shape_and_jit():
+    env = Roulette()
+    fn = jax.jit(env.sample_all_rewards)
+    samples = fn(jax.random.PRNGKey(0), jnp.int32(0))
+    assert samples.shape == (171,)
+    assert float(samples[-1]) == 0
+    assert jnp.all(jnp.asarray(fn(jax.random.PRNGKey(0), jnp.int32(1))) == 0)
+
+
+def test_roulette_shared_pocket_same_sample_as_step():
+    env = Roulette()
+    key = jax.random.PRNGKey(5)
+    all_rewards = env.sample_all_rewards(key, jnp.int32(0), shared_spin=True)
+    for action in (0, 20, 100, 169):
+        assert jnp.isclose(
+            float(all_rewards[action]),
+            float(env.step(key, jnp.int32(0), action)[2]),
+        )
+
+
+def test_transition_models_are_stochastic():
+    for env in (
+        Roulette(), StochasticGridworld(), StochasticCliffWalking(),
+        FrozenLake(), FrozenLake(map_name="8x8"),
+    ):
+        P, R = env.transition_model()
+        assert P.shape == R.shape == (env.num_states, env.num_actions, env.num_states)
+        assert jnp.allclose(jnp.asarray(P.sum(axis=-1)), 1.0, atol=1e-6)
+        assert jnp.all(jnp.asarray(P) >= -1e-7)
+        assert jnp.all(jnp.isfinite(jnp.asarray(R)))
+
+
+@pytest.mark.parametrize("action", [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT])
+def test_stochastic_gridworld_reduces_to_gridworld(action):
+    original = Gridworld()
+    noisy = StochasticGridworld(slip_prob=0, reward_std=0)
+    for state in (0, 5, 10, 15):
+        got = noisy.step(jax.random.PRNGKey(0), jnp.int32(state), action)
+        expected = original.step(jax.random.PRNGKey(0), jnp.int32(state), action)
+        assert all(bool(jnp.array_equal(a, b)) for a, b in zip(got[:4], expected[:4]))
+
+
+def test_stochastic_gridworld_slip_distribution():
+    env = StochasticGridworld(slip_prob=0.2, reward_std=0)
+    P, R = env.transition_model()
+    # From center cell (row 1, col 1), UP goes to state 1, side turns to 4 / 6.
+    assert jnp.isclose(float(P[5, Action.UP, 1]), .8)
+    assert jnp.isclose(float(P[5, Action.UP, 4]), .1)
+    assert jnp.isclose(float(P[5, Action.UP, 6]), .1)
+    assert jnp.isclose(float(R[5, Action.UP, 1]), -1.)
+    assert jnp.isclose(float(P[0, Action.UP, 0]), 1.)
+    assert jnp.isclose(float(R[0, Action.UP, 0]), 0.)
+
+
+def test_stochastic_cliff_reduces_to_cliff_walking():
+    original = CliffWalking()
+    noisy = StochasticCliffWalking(slip_prob=0, reward_std=0)
+    for state, action in [(36, Action.RIGHT), (24, Action.DOWN), (47, Action.LEFT)]:
+        got = noisy.step(jax.random.PRNGKey(0), jnp.int32(state), action)
+        expected = original.step(jax.random.PRNGKey(0), jnp.int32(state), action)
+        assert all(bool(jnp.array_equal(a, b)) for a, b in zip(got[:4], expected[:4]))
+
+
+def test_stochastic_cliff_falling_penalty_in_model():
+    env = StochasticCliffWalking(slip_prob=0.2, reward_std=0)
+    P, R = env.transition_model()
+    # From start, RIGHT falls into cliff and resets, LEFT stays at start,
+    # DOWN clips to start.
+    assert jnp.isclose(float(P[36, Action.RIGHT, 36]), .9)
+    assert jnp.isclose(float(P[36, Action.RIGHT, 24]), .1)
+    assert jnp.isclose(float(R[36, Action.RIGHT, 36]), (-100 * .8 - 1 * .1) / .9)
+
+
+def test_frozen_lake_deterministic_and_absorbing():
+    env = FrozenLake(is_slippery=False)
+    state, _ = env.reset(jax.random.PRNGKey(0))
+    assert int(state) == 0
+    state, _, reward, done, _ = env.step(jax.random.PRNGKey(1), state, Action.RIGHT)
+    assert int(state) == 1 and float(reward) == 0 and not bool(done)
+    state, _, reward, done, _ = env.step(jax.random.PRNGKey(2), state, Action.DOWN)
+    assert int(state) == 5 and float(reward) == 0 and bool(done)
+    next_state, _, reward, done, _ = env.step(jax.random.PRNGKey(3), state, Action.RIGHT)
+    assert int(next_state) == 5 and float(reward) == 0 and bool(done)
+
+
+def test_frozen_lake_slippery_start_transition():
+    env = FrozenLake()
+    P, R = env.transition_model()
+    # UP: UP and LEFT hit the boundary, RIGHT moves to state 1.
+    assert jnp.isclose(float(P[0, Action.UP, 0]), 2/3)
+    assert jnp.isclose(float(P[0, Action.UP, 1]), 1/3)
+    assert jnp.isclose(float(R[0, Action.UP, 0]), 0)
+
+
+def test_frozen_lake_goal_reward():
+    env = FrozenLake(is_slippery=False)
+    state, _, reward, done, _ = env.step(jax.random.PRNGKey(0), jnp.int32(14), Action.RIGHT)
+    assert int(state) == 15 and float(reward) == 1. and bool(done)
+    state, _, reward, done, _ = env.step(jax.random.PRNGKey(0), state, Action.LEFT)
+    assert int(state) == 15 and float(reward) == 0 and bool(done)
+
+
+def test_jit_vmap_of_step():
+    key = jax.random.PRNGKey(0)
+    for env, state in (
+        (Roulette(), 0), (StochasticGridworld(), 5),
+        (StochasticCliffWalking(), 36), (FrozenLake(), 0),
+    ):
+        fn = jax.jit(env.step)
+        result = fn(key, jnp.int32(state), jnp.int32(0))
+        assert len(result) == 5
+        batched = jax.jit(jax.vmap(env.step))(
+            jax.random.split(key, 4),
+            jnp.full((4,), state, dtype=jnp.int32),
+            jnp.zeros((4,), dtype=jnp.int32),
+        )
+        assert batched[2].shape == (4,)
