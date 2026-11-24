@@ -1177,3 +1177,34 @@ def off_policy_n_step_sarsa_jit(
         )
 
     return Q
+
+
+def n_step_tree_backup_return(
+    states,
+    actions,
+    rewards,
+    Q,
+    target_policy,
+    tau,
+    T,
+    n,
+    gamma=1.0,
+):
+    """
+    Compute the n-step Tree Backup return for
+    the state-action pair at time tau.
+    """
+    value = 0.0
+
+    if tau + n < T: 
+        idx = (tau + n) % (n + 1)
+        state = states[idx]
+        p_actions = target_policy.action_probs[state]
+        v = jnp.sum(p_actions * Q[state])
+        value += v * (gamma ** n)
+
+    for i in range(tau, min(tau + n, T)):
+        value += rewards[i % n] * gamma ** (i - tau)
+
+    return value
+

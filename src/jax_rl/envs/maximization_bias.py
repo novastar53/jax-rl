@@ -57,11 +57,12 @@ class MaximizationBias:
             {},
         )
 
+
     def action_mask(self, state):
         actions = jnp.arange(self.num_actions)
 
         return jnp.where(
             state == 0,
             actions < 2,
-            actions < self.num_actions,
+            state == 1,
         )

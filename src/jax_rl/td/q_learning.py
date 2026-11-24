@@ -291,6 +291,48 @@ def double_q_learning_update(
         return Q1, Q_update
 
 
+
+def double_update(
+    Q1, Q2, N1, N2,
+    state, action, reward, next_state,
+    terminated, update_first, gamma,
+):
+    def update(Q, other, N):
+        count = N[state, action] + 1
+        alpha = 1.0 / count.astype(Q.dtype) ** 0.8
+
+        greedy_action = jnp.argmax(Q[next_state])
+
+        target = reward + gamma * jnp.where(
+            terminated,
+            0.0,
+            other[next_state, greedy_action],
+        )
+
+        Q = Q.at[state, action].add(
+            alpha * (target - Q[state, action])
+        )
+
+        N = N.at[state, action].set(count)
+
+        return Q, N
+
+    def update_q1(_):
+        Q1_new, N1_new = update(Q1, Q2, N1)
+        return Q1_new, Q2, N1_new, N2
+
+    def update_q2(_):
+        Q2_new, N2_new = update(Q2, Q1, N2)
+        return Q1, Q2_new, N1, N2_new
+
+    return jax.lax.cond(
+        update_first,
+        update_q1,
+        update_q2,
+        operand=None,
+    )
+
+
 def double_q_learning(
     env,
     policy,
@@ -299,29 +341,61 @@ def double_q_learning(
     alpha=0.1,
     gamma=1.0,
     max_steps=1000,
+    decay_exponent=None,
 ):
-    """
-    Tabular Double Q-learning control.
+    Q1 = jnp.zeros((env.num_states, env.num_actions))
+    Q2 = jnp.zeros_like(Q1)
 
-    Returns:
-        Q1, Q2: Two learned action-value tables.
-    """
-    Q1 = jnp.zeros((env.num_states, env.num_actions), dtype=jnp.float32)
-    Q2 = jnp.zeros((env.num_states, env.num_actions), dtype=jnp.float32)
+    N1 = jnp.zeros_like(Q1, dtype=jnp.int32)
+    N2 = jnp.zeros_like(Q2, dtype=jnp.int32)
 
     for _ in range(num_episodes):
         key, env_key, action_key = jax.random.split(key, 3)
         env_state, observation = env.reset(env_key)
-        action = policy.select_action(action_key, Q1[observation] + Q2[observation])
+
+        action = policy.select_action(
+            action_key, Q1[observation] + Q2[observation]
+        )
+
         for _ in range(max_steps):
             key, env_key, action_key, update_key = jax.random.split(key, 4)
-            new_state, new_observation, reward, terminated, _ = env.step(env_key, env_state, action)
-            update_first = jax.random.bernoulli(update_key, p=0.5)
-            Q1, Q2 = double_q_learning_update(Q1, Q2, observation, action, reward, new_observation, terminated, update_first, alpha, gamma)
+
+            new_state, new_observation, reward, terminated, _ = (
+                env.step(env_key, env_state, action)
+            )
+
+            update_first = bool(jax.random.bernoulli(update_key))
+
+            if update_first:
+                N1 = N1.at[observation, action].add(1)
+                count = N1[observation, action]
+            else:
+                N2 = N2.at[observation, action].add(1)
+                count = N2[observation, action]
+
+            if decay_exponent is None:
+                step_alpha = alpha
+            else:
+                step_alpha = count.astype(Q1.dtype) ** (-decay_exponent)
+
+            Q1, Q2 = double_q_learning_update(
+                Q1, Q2,
+                observation, action, reward,
+                new_observation, terminated,
+                update_first,
+                alpha=step_alpha,
+                gamma=gamma,
+            )
+
             if bool(terminated):
                 break
+
             env_state, observation = new_state, new_observation
-            action = policy.select_action(action_key, Q1[observation] + Q2[observation])
+
+            action = policy.select_action(
+                action_key,
+                Q1[observation] + Q2[observation],
+            )
         else:
             raise RuntimeError(
                 f"Episode did not terminate within {max_steps} steps"
@@ -338,6 +412,7 @@ def double_q_learning(
         "policy",
         "num_episodes",
         "max_steps",
+        "decay_exponent",
     ),
 )
 def _double_q_learning_jit(
@@ -348,18 +423,21 @@ def _double_q_learning_jit(
     alpha,
     gamma,
     max_steps,
+    decay_exponent,
 ):
     Q1 = jnp.zeros(
-        (env.num_states, env.num_actions),
-        dtype=jnp.float32,
+        (env.num_states, env.num_actions), dtype=jnp.float32
     )
     Q2 = jnp.zeros_like(Q1)
 
+    N1 = jnp.zeros_like(Q1, dtype=jnp.int32)
+    N2 = jnp.zeros_like(Q2, dtype=jnp.int32)
+
     def train_episode(carry, _):
-        Q1, Q2, key, failed = carry
+        Q1, Q2, N1, N2, key, failed = carry
 
         def skip_episode(_):
-            return Q1, Q2, key, failed
+            return Q1, Q2, N1, N2, key, failed
 
         def run_episode(_):
             episode_key, reset_key, action_key = (
@@ -374,107 +452,82 @@ def _double_q_learning_jit(
             )
 
             initial = (
-                Q1,
-                Q2,
-                episode_key,
-                env_state,
-                observation,
-                action,
-                jnp.int32(0),       # steps
-                jnp.bool_(False),   # done
-                jnp.bool_(False),   # failed
+                Q1, Q2, N1, N2, episode_key,
+                env_state, observation, action,
+                jnp.int32(0),
+                jnp.bool_(False),
+                jnp.bool_(False),
             )
 
             def condition(carry):
-                return ~carry[7]
+                return ~carry[9]
 
             def step(carry):
                 (
-                    Q1, Q2, key, env_state,
-                    observation, action, steps,
-                    done, failed,
+                    Q1, Q2, N1, N2, key,
+                    env_state, observation, action,
+                    steps, done, failed,
                 ) = carry
 
                 (
-                    next_key,
-                    step_key,
-                    action_key,
-                    update_key,
+                    next_key, step_key,
+                    action_key, update_key,
                 ) = jax.random.split(key, 4)
 
                 (
-                    next_env_state,
-                    next_observation,
-                    reward,
-                    terminated,
-                    _,
+                    next_env_state, next_observation,
+                    reward, terminated, _,
                 ) = env.step(step_key, env_state, action)
 
-                reward = jnp.asarray(
-                    reward, dtype=Q1.dtype
-                )
+                reward = jnp.asarray(reward, dtype=Q1.dtype)
 
                 update_first = jax.random.bernoulli(
                     update_key, p=0.5
                 )
 
-                def update_q1(_):
-                    def bootstrap(_):
-                        next_action = jnp.argmax(
-                            Q1[next_observation]
+                def update_one(Q, other, N):
+                    count = N[observation, action] + 1
+
+                    if decay_exponent is None:
+                        step_alpha = alpha
+                    else:
+                        step_alpha = (
+                            count.astype(Q.dtype) ** (-decay_exponent)
                         )
 
-                        return (
-                            reward
-                            + gamma
-                            * Q2[next_observation, next_action]
-                        )
+                    next_action = jnp.argmax(
+                        Q[next_observation]
+                    )
 
-                    target = jax.lax.cond(
+                    target = reward + gamma * jnp.where(
                         terminated,
-                        lambda _: reward,
-                        bootstrap,
-                        operand=None,
+                        0.0,
+                        other[next_observation, next_action],
                     )
 
-                    updated_Q1 = Q1.at[
-                        observation, action
-                    ].add(
-                        alpha
-                        * (target - Q1[observation, action])
+                    Q = Q.at[observation, action].add(
+                        step_alpha * (
+                            target - Q[observation, action]
+                        )
                     )
 
-                    return updated_Q1, Q2
+                    N = N.at[observation, action].set(count)
+
+                    return Q, N
+
+                def update_q1(_):
+                    updated_Q1, updated_N1 = update_one(
+                        Q1, Q2, N1
+                    )
+                    return updated_Q1, Q2, updated_N1, N2
 
                 def update_q2(_):
-                    def bootstrap(_):
-                        next_action = jnp.argmax(
-                            Q2[next_observation]
-                        )
-
-                        return (
-                            reward
-                            + gamma
-                            * Q1[next_observation, next_action]
-                        )
-
-                    target = jax.lax.cond(
-                        terminated,
-                        lambda _: reward,
-                        bootstrap,
-                        operand=None,
+                    updated_Q2, updated_N2 = update_one(
+                        Q2, Q1, N2
                     )
+                    return Q1, updated_Q2, N1, updated_N2
 
-                    updated_Q2 = Q2.at[
-                        observation, action
-                    ].add(
-                        alpha
-                        * (target - Q2[observation, action])
-                    )
-
-                    return Q1, updated_Q2
-
-                Q1, Q2 = jax.lax.cond(
+                Q1, Q2, N1, N2 = jax.lax.cond(
                     update_first,
                     update_q1,
                     update_q2,
@@ -486,8 +539,7 @@ def _double_q_learning_jit(
                     lambda _: action,
                     lambda _: policy.select_action(
                         action_key,
-                        Q1[next_observation]
-                        + Q2[next_observation],
+                        Q1[next_observation] + Q2[next_observation],
                     ),
                     operand=None,
                 )
@@ -499,28 +551,18 @@ def _double_q_learning_jit(
                 done = terminated | failed
 
                 return (
-                    Q1,
-                    Q2,
-                    next_key,
-                    next_env_state,
-                    next_observation,
-                    next_action,
-                    steps + 1,
-                    done,
-                    failed,
+                    Q1, Q2, N1, N2, next_key,
+                    next_env_state, next_observation,
+                    next_action, steps + 1, done, failed,
                 )
 
             final = jax.lax.while_loop(
-                condition,
-                step,
-                initial,
+                condition, step, initial
             )
 
             return (
-                final[0],
-                final[1],
-                final[2],
-                final[8],
+                final[0], final[1], final[2],
+                final[3], final[4], final[10],
             )
 
         next_carry = jax.lax.cond(
@@ -532,14 +574,18 @@ def _double_q_learning_jit(
 
         return next_carry, None
 
-    (Q1, Q2, _, failed), _ = jax.lax.scan(
+    (Q1, Q2, _, _, _, failed), _ = jax.lax.scan(
         train_episode,
-        (Q1, Q2, key, jnp.bool_(False)),
+        (
+            Q1, Q2, N1, N2,
+            key, jnp.bool_(False),
+        ),
         None,
         length=num_episodes,
     )
 
     return Q1, Q2, failed
+
 
 
 def double_q_learning_jit(
@@ -550,6 +596,7 @@ def double_q_learning_jit(
     alpha=0.1,
     gamma=1.0,
     max_steps=1000,
+    decay_exponent=None,
 ):
     """
     JIT-compiled tabular Double Q-learning.
@@ -571,6 +618,7 @@ def double_q_learning_jit(
         alpha,
         gamma,
         max_steps,
+        decay_exponent,
     )
 
     if bool(failed):

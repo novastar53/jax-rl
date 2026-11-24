@@ -1943,54 +1943,48 @@ class TestNStepSarsaReturn:
         # 1 + 0.5*2 + 0.25*30 = 9.5
         assert jnp.isclose(result, 9.5)
 
+    def test_bootstrap_at_last_nonterminal_state(self):
+        # n=2, so rewards has 2 slots and states/actions have 3.
+        # R2 occupies slot 1; R3 occupies slot 0.
+        rewards = [3.0, 2.0]
+        states = [3, 1, 2]
+        actions = [1, 1, 0]
 
+        result = n_step_sarsa_return(
+            rewards,
+            states,
+            actions,
+            self.Q,
+            tau=1,
+            T=4,
+            n=2,
+            gamma=0.5,
+        )
 
-def test_bootstrap_at_last_nonterminal_state(self):
-    # n=2, so rewards has 2 slots and states/actions have 3.
-    # R2 occupies slot 1; R3 occupies slot 0.
-    rewards = [3.0, 2.0]
-    states = [3, 1, 2]
-    actions = [1, 1, 0]
+        # tau+n = 3 = T-1, so bootstrapping is required.
+        # 2 + 0.5*3 + 0.25*Q(3, 1)
+        # = 2 + 1.5 + 10.25 = 13.75
+        assert jnp.isclose(result, 13.75)
 
-    result = n_step_sarsa_return(
-        rewards,
-        states,
-        actions,
-        self.Q,
-        tau=1,
-        T=4,
-        n=2,
-        gamma=0.5,
-    )
+    def test_no_bootstrap_at_terminal_state(self):
+        rewards = [3.0, 2.0]
+        states = [3, 1, 2]
+        actions = [1, 1, 0]
 
-    # tau+n = 3 = T-1, so bootstrapping is required.
-    # 2 + 0.5*3 + 0.25*Q(3, 1)
-    # = 2 + 1.5 + 10.25 = 13.75
-    assert jnp.isclose(result, 13.75)
+        result = n_step_sarsa_return(
+            rewards,
+            states,
+            actions,
+            self.Q,
+            tau=1,
+            T=3,
+            n=2,
+            gamma=0.5,
+        )
 
-
-
-def test_no_bootstrap_at_terminal_state(self):
-    rewards = [3.0, 2.0]
-    states = [3, 1, 2]
-    actions = [1, 1, 0]
-
-    result = n_step_sarsa_return(
-        rewards,
-        states,
-        actions,
-        self.Q,
-        tau=1,
-        T=3,
-        n=2,
-        gamma=0.5,
-    )
-
-    # tau+n = T, so no bootstrap.
-    # 2 + 0.5*3 = 3.5
-    assert jnp.isclose(result, 3.5)
-
-
+        # tau+n = T, so no bootstrap.
+        # 2 + 0.5*3 = 3.5
+        assert jnp.isclose(result, 3.5)
 
     def test_n_exceeds_remaining_episode(self):
         rewards = [1.0, 2.0, 3.0, 4.0, 5.0]
