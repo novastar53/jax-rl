@@ -12,44 +12,54 @@ def q_learning(
     alpha=0.1,
     gamma=1.0,
     max_steps=1000,
+    decay_exponent=None,
 ):
-    """
-    Off-policy tabular Q-learning control.
+    Q = jnp.zeros(
+        (env.num_states, env.num_actions),
+        dtype=jnp.float32,
+    )
+    N = jnp.zeros_like(Q, dtype=jnp.int32)
 
-    Args:
-        env: Episodic environment.
-        policy: Behavior policy with select_action(key, q_values).
-        key: JAX PRNG key.
-        num_episodes: Number of episodes.
-        alpha: Learning rate.
-        gamma: Discount factor.
-        max_steps: Maximum transitions per episode.
-
-    Returns:
-        Q: (S, A) learned action values.
-    """
-    Q = jnp.zeros(shape=(env.num_states, env.num_actions), dtype=jnp.float32)
     for _ in range(num_episodes):
         key, env_key, action_key = jax.random.split(key, 3)
         env_state, observation = env.reset(env_key)
         action = policy.select_action(action_key, Q[observation])
+
         for _ in range(max_steps):
             key, env_key, action_key = jax.random.split(key, 3)
-            new_state, new_observation, reward, terminated, _ = env.step(env_key, env_state, action)
-            q_old = Q[observation, action]
-            if bool(terminated):
-                delta = alpha * (reward - q_old)
-                Q = Q.at[observation, action].add(delta) 
-                break
+
+            new_state, new_observation, reward, terminated, _ = (
+                env.step(env_key, env_state, action)
+            )
+
+            count = N[observation, action] + 1
+            N = N.at[observation, action].set(count)
+
+            if decay_exponent is None:
+                step_alpha = alpha
             else:
-                delta = alpha * (reward + gamma * jnp.max(Q[new_observation]) - q_old)
-                Q = Q.at[observation, action].add(delta) 
+                step_alpha = count.astype(Q.dtype) ** (-decay_exponent)
+
+            target = reward
+            if not bool(terminated):
+                target += gamma * jnp.max(Q[new_observation])
+
+            Q = Q.at[observation, action].add(
+                step_alpha * (target - Q[observation, action])
+            )
+
+            if bool(terminated):
+                break
+
             env_state, observation = new_state, new_observation
-            action = policy.select_action(action_key, Q[observation])
+            action = policy.select_action(
+                action_key, Q[observation]
+            )
         else:
             raise RuntimeError(
                 f"Episode did not terminate within {max_steps} steps"
             )
+
     return Q
 
 
@@ -62,6 +72,7 @@ def q_learning(
         "num_episodes",
         "max_steps",
         "truncate",
+        "decay_exponent",
     ),
 )
 def _train_q_learning(
@@ -73,21 +84,21 @@ def _train_q_learning(
     gamma,
     max_steps,
     truncate,
+    decay_exponent,
 ):
     Q = jnp.zeros(
         (env.num_states, env.num_actions),
         dtype=jnp.float32,
     )
+    N = jnp.zeros_like(Q, dtype=jnp.int32)
 
     def run_episode(carry):
-        key, Q, failed = carry
+        key, Q, N, failed = carry
 
         key, reset_key, action_key = jax.random.split(key, 3)
         env_state, state = env.reset(reset_key)
 
-        action = policy.select_action(
-            action_key, Q[state]
-        )
+        action = policy.select_action(action_key, Q[state])
 
         initial = (
             key,
@@ -95,35 +106,26 @@ def _train_q_learning(
             state,
             action,
             Q,
+            N,
             jnp.int32(0),
             jnp.float32(0.0),
             jnp.bool_(False),
         )
 
         def condition(c):
-            _, _, _, _, _, steps, _, terminated = c
-            return (steps < max_steps) & (~terminated)
+            return (c[6] < max_steps) & (~c[8])
 
         def step(c):
             (
-                key,
-                env_state,
-                state,
-                action,
-                Q,
-                steps,
-                total_reward,
-                _,
+                key, env_state, state, action,
+                Q, N, steps, total_reward, _,
             ) = c
 
-            key, step_key, action_key = jax.random.split(
-                key, 3
-            )
+            key, step_key, action_key = jax.random.split(key, 3)
 
             next_env_state, next_state, reward, terminated, _ = (
                 env.step(step_key, env_state, action)
             )
-
 
             target = jnp.where(
                 terminated,
@@ -131,12 +133,18 @@ def _train_q_learning(
                 reward + gamma * jnp.max(Q[next_state]),
             )
 
-            Q = Q.at[state, action].add(
-                alpha * (target - Q[state, action])
-            )
+            count = N[state, action] + 1
 
-            # Choose the next behavior action
-            # after updating Q.
+            if decay_exponent is None:
+                step_alpha = alpha
+            else:
+                step_alpha = count.astype(Q.dtype) ** (-decay_exponent)
+
+            Q = Q.at[state, action].add(
+                step_alpha * (target - Q[state, action])
+            )
+            N = N.at[state, action].set(count)
+
             next_action = policy.select_action(
                 action_key, Q[next_state]
             )
@@ -147,58 +155,41 @@ def _train_q_learning(
                 next_state,
                 next_action,
                 Q,
+                N,
                 steps + 1,
                 total_reward + reward,
                 terminated,
             )
 
         (
-            key,
-            _,
-            _,
-            _,
-            Q,
-            _,
-            total_reward,
-            terminated,
-        ) = jax.lax.while_loop(
-            condition,
-            step,
-            initial,
-        )
+            key, _, _, _, Q, N, _,
+            total_reward, terminated,
+        ) = jax.lax.while_loop(condition, step, initial)
 
         failed = failed | (~terminated)
 
-        return (key, Q, failed), total_reward
+        return (key, Q, N, failed), total_reward
 
     def episode_step(carry, _):
-        # Preserve the reference implementation's
-        # failure behavior: stop after an episode
-        # exceeds max_steps.
         if truncate:
             return run_episode(carry)
 
         return jax.lax.cond(
-            carry[2],
+            carry[3],
             lambda c: (c, jnp.float32(0.0)),
             run_episode,
             carry,
         )
 
-    initial_carry = (
-        key,
-        Q,
-        jnp.bool_(False),
-    )
-
-    (_, Q, failed), episode_returns = jax.lax.scan(
+    (_, Q, N, failed), episode_returns = jax.lax.scan(
         episode_step,
-        initial_carry,
+        (key, Q, N, jnp.bool_(False)),
         xs=None,
         length=num_episodes,
     )
 
     return Q, episode_returns, failed
+
 
 
 def q_learning_jit(
@@ -211,6 +202,7 @@ def q_learning_jit(
     max_steps=1000,
     return_history=False,
     truncate=False,
+    decay_exponent=None,
 ):
     if num_episodes < 0:
         raise ValueError("num_episodes must be nonnegative")
@@ -227,6 +219,7 @@ def q_learning_jit(
         gamma,
         max_steps,
         truncate,
+        decay_exponent,
     )
 
     if bool(failed) and not truncate:

@@ -163,6 +163,7 @@ def update_gaussian_weighted_q(
     initial_standard_error=1.0,
     next_action_mask=None,
     fixed_alpha=None,
+    decay_exponent=0.8,
 ):
     variance = weighted_sample_variance(
         state.variance, state.ess
@@ -194,7 +195,7 @@ def update_gaussian_weighted_q(
 
     count = state.N[s, a] + 1
     if fixed_alpha is None:
-        alpha = 1.0 / count.astype(state.Q.dtype) ** 0.8
+        alpha = count.astype(state.Q.dtype) ** (-decay_exponent)
     else:
         alpha = jnp.asarray(fixed_alpha, dtype=state.Q.dtype)
 

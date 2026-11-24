@@ -45,6 +45,7 @@ def double_update(
 
 
 def q_learning_episode(carry, env, epsilon, alpha, gamma):
+
     Q, key = carry
 
     key, reset_key, action_key, step_key, b_action_key, b_step_key = (

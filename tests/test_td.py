@@ -3535,3 +3535,189 @@ def test_double_q_learning_jit_invalid_max_steps():
         )
 
 
+
+from dataclasses import dataclass
+
+import jax
+import jax.numpy as jnp
+
+from jax_rl.td.q_learning import double_q_learning_jit
+
+
+@dataclass(frozen=True)
+class SingleActionEnv:
+    num_states: int = 1
+    num_actions: int = 1
+
+    def reset(self, key):
+        state = jnp.int32(0)
+        return state, state
+
+    def step(self, key, env_state, action):
+        return (
+            env_state,
+            env_state,
+            jnp.float32(1.0),
+            jnp.bool_(True),
+            {},
+        )
+
+
+@dataclass(frozen=True)
+class SingleActionPolicy:
+    def select_action(self, key, q_values):
+        return jnp.int32(0)
+
+
+
+def test_double_q_first_decaying_update():
+    env = SingleActionEnv()
+    policy = SingleActionPolicy()
+
+    Q1, Q2 = double_q_learning_jit(
+        env,
+        policy,
+        jax.random.key(0),
+        num_episodes=1,
+        decay_exponent=0.8,
+    )
+
+    # The first update has alpha = 1.
+    assert jnp.isclose(Q1[0, 0] + Q2[0, 0], 1.0)
+
+
+def test_double_q_separate_update_counts():
+    env = SingleActionEnv()
+    policy = SingleActionPolicy()
+
+    Q1, Q2 = double_q_learning_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=40,
+        decay_exponent=0.8,
+    )
+
+    # Both tables should have been updated.
+    # Each table's first update uses alpha = 1,
+    # immediately learning the deterministic reward.
+    assert jnp.isclose(Q1[0, 0], 1.0)
+    assert jnp.isclose(Q2[0, 0], 1.0)
+
+
+def test_double_q_constant_learning_rate():
+    env = SingleActionEnv()
+    policy = SingleActionPolicy()
+
+    alpha = 0.2
+    num_episodes = 20
+
+    Q1, Q2 = double_q_learning_jit(
+        env,
+        policy,
+        jax.random.key(42),
+        num_episodes=num_episodes,
+        alpha=alpha,
+    )
+
+    # After n updates with reward 1:
+    # Q = 1 - (1 - alpha)**n
+    #
+    # Since n1 + n2 = num_episodes:
+    # (1 - Q1)(1 - Q2) = (1 - alpha)**num_episodes
+
+    remaining_error = (1 - Q1[0, 0]) * (1 - Q2[0, 0])
+    expected = (1 - alpha) ** num_episodes
+
+    assert jnp.isclose(remaining_error, expected, atol=1e-6)
+
+
+
+@dataclass(frozen=True)
+class ThreeStepRewardEnv:
+    num_states: int = 1
+    num_actions: int = 1
+
+    def reset(self, key):
+        return jnp.int32(0), jnp.int32(0)
+
+    def step(self, key, env_state, action):
+        next_t = env_state + 1
+        reward = jnp.where(env_state == 1, 2.0, 0.0)
+
+        return (
+            next_t,
+            jnp.int32(0),
+            reward,
+            next_t == 3,
+            {},
+        )
+
+
+def test_q_learning_decaying_rate():
+    env = ThreeStepRewardEnv()
+    policy = SingleActionPolicy()
+
+    Q = q_learning_jit(
+        env,
+        policy,
+        jax.random.key(0),
+        num_episodes=1,
+        gamma=0.0,
+        max_steps=3,
+        decay_exponent=0.8,
+    )
+
+    alpha2 = 2.0 ** -0.8
+    alpha3 = 3.0 ** -0.8
+
+    expected = 2.0 * alpha2 * (1.0 - alpha3)
+
+    assert jnp.isclose(Q[0, 0], expected)
+
+
+def test_q_learning_constant_rate():
+    env = ThreeStepRewardEnv()
+    policy = SingleActionPolicy()
+
+    Q = q_learning_jit(
+        env,
+        policy,
+        jax.random.key(0),
+        num_episodes=1,
+        alpha=0.2,
+        gamma=0.0,
+        max_steps=3,
+    )
+
+    expected = 0.2 * (0.2 * 2.0) * 4.0
+
+    assert jnp.isclose(Q[0, 0], expected)
+
+
+def test_q_learning_jit_matches_python():
+    env = ThreeStepRewardEnv()
+    policy = SingleActionPolicy()
+    key = jax.random.key(0)
+
+    kwargs = dict(
+        num_episodes=2,
+        gamma=0.0,
+        max_steps=3,
+        decay_exponent=0.8,
+    )
+
+    Q_python = q_learning(env, policy, key, **kwargs)
+    Q_jit, returns = q_learning_jit(
+        env, policy, key, return_history=True, **kwargs
+    )
+
+    expected = 0.0
+
+    for n, reward in enumerate([0, 2, 0] * 2, start=1):
+        alpha = n ** -0.8
+        expected += alpha * (reward - expected)
+
+    assert jnp.isclose(Q_python[0, 0], expected)
+    assert jnp.allclose(Q_jit, Q_python)
+    assert jnp.allclose(returns, jnp.array([2.0, 2.0]))
