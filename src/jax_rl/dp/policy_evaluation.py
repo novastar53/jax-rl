@@ -2,6 +2,21 @@ import jax
 import jax.numpy as jnp
 
 
+def exact_discounted_policy_evaluation(P, R, policy, gamma=0.99):
+    """Solve the finite discounted policy Bellman equations.
+
+    P and R have shape (states, actions, states), with R the conditional
+    expected transition reward; policy has shape (states, actions). For
+    0 <= gamma < 1, return V = (I - gamma P_pi)^-1 r_pi. Absorbing terminal
+    states must have zero reward; alternatively their policy row may be zero,
+    in which case their value is fixed at zero. This is a model-based evaluator,
+    not a learning update. Results inherit the input's floating-point precision.
+    """
+    p_pi = jnp.einsum("sa,sat->st", policy, P)
+    r_pi = jnp.einsum("sa,sat,sat->s", policy, P, R)
+    return jnp.linalg.solve(jnp.eye(P.shape[0], dtype=p_pi.dtype) - gamma * p_pi, r_pi)
+
+
 def bellman_sweep(P, R, policy, V, gamma=1.0):
     """
     P: (S, A, S) transition probabilities
